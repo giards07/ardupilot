@@ -3499,7 +3499,9 @@ void NavEKF::getVelNED(Vector3f &vel) const
 // return false if no position is available
 bool NavEKF::getPosNED(Vector3f &pos) const
 {
-    pos = state.position;
+    pos.x = state.position.x;
+    pos.y = state.position.y;
+    pos.z = state.position.z - flowStates[1];
     return true;
 }
 
