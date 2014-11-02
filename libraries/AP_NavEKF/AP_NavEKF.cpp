@@ -4295,7 +4295,7 @@ void NavEKF::ZeroVariables()
     flowFusePerformed = false;
     fuseOptFlowData = false;
     memset(&Popt[0][0], 0, sizeof(Popt));
-    flowStates[0] = 0.9f;
+    flowStates[0] = 1.0f;
     flowStates[1] = 0.0f;
     prevPosN = gpsPosNE.x;
     prevPosE = gpsPosNE.y;
