@@ -3031,6 +3031,7 @@ void NavEKF::FuseOptFlow()
         // Calculate the number of averaging frames left to go. This is required because flow fusion is applied across two consecutive prediction cycles
         // There is no point averaging if the number of cycles left is less than 2
         float minorFramesToGo = float(flowUpdateCountMax) - float(flowUpdateCount);
+        //hal.console->printf("minor frames to go = %e, highRates = %e \n", minorFramesToGo, float(highRates));
         for (uint8_t i = 0; i<=21; i++) {
             if ((i <= 3 && highRates) || i >= 10 || minorFramesToGo < 1.5f) {
                 states[i] = states[i] - Kfusion[i] * innovOptFlow[obsIndex];
