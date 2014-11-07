@@ -76,7 +76,11 @@ void AP_OpticalFlow_PX4::update(void)
             _bodyRate.y = 0.0f;
         }
         _last_timestamp = report.timestamp;
+//        uint32_t temp1 = hal.scheduler->millis() - _last_update;
         _last_update = hal.scheduler->millis();
+
+//        uint16_t temp2 = report.frame_count_since_last_readout;
+//        hal.console->printf("count = %u, dtFMU = %u, dtFlow = %u \n",temp2, temp1, report.integration_timespan);
     }
 }
 
