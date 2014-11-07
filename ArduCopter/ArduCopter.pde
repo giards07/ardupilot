@@ -1009,6 +1009,11 @@ static void fast_loop()
 
     // run the attitude controllers
     update_flight_mode();
+
+    if (g.log_bitmask & MASK_LOG_DEBUG) {
+       Log_Write_Debug();
+   }
+
 }
 
 // rc_loops - reads user input from transmitter/receiver

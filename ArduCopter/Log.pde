@@ -270,7 +270,32 @@ static void Log_Write_Optflow()
  #endif     // OPTFLOW == ENABLED
 }
 
-struct PACKED log_Nav_Tuning {
+struct PACKED log_Debug {
+    LOG_PACKET_HEADER;
+    uint32_t time_ms;
+    float value1;
+    float value2;
+    float value3;
+    float value4;
+};
+
+// Write a debug packet
+static void Log_Write_Debug()
+{
+    const Vector3f &position = inertial_nav.get_position();
+    const Vector3f &velocity = inertial_nav.get_velocity();
+    struct log_Debug pkt = {
+        LOG_PACKET_HEADER_INIT(LOG_DEBUG_MSG),
+        time_ms         : hal.scheduler->millis(),
+        value1          : velocity.x,
+        value2          : velocity.y,
+        value3          : position.x,
+        value4          : position.y
+    };
+    DataFlash.WriteBlock(&pkt, sizeof(pkt));
+}
+
+        struct PACKED log_Nav_Tuning {
     LOG_PACKET_HEADER;
     uint32_t time_ms;
     float    desired_pos_x;
@@ -675,7 +700,9 @@ static const struct LogStructure log_structure[] PROGMEM = {
       "CURR", "IhIhhhf",     "TimeMS,ThrOut,ThrInt,Volt,Curr,Vcc,CurrTot" },
     { LOG_OPTFLOW_MSG, sizeof(log_Optflow),       
       "OF",   "IBffff",   "TimeMS,Qual,flowX,flowY,bodyX,bodyY" },
-    { LOG_NAV_TUNING_MSG, sizeof(log_Nav_Tuning),       
+    { LOG_DEBUG_MSG, sizeof(log_Debug),
+      "DBG",   "Iffff",   "TimeMS,val1,val2,val3,val4" },
+    { LOG_NAV_TUNING_MSG, sizeof(log_Nav_Tuning),
       "NTUN", "Iffffffffff", "TimeMS,DPosX,DPosY,PosX,PosY,DVelX,DVelY,VelX,VelY,DAccX,DAccY" },
     { LOG_CONTROL_TUNING_MSG, sizeof(log_Control_Tuning),
       "CTUN", "Ihhhffecchh", "TimeMS,ThrIn,AngBst,ThrOut,DAlt,Alt,BarAlt,DSAlt,SAlt,DCRt,CRt" },
