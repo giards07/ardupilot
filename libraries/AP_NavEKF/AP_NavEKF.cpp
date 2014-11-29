@@ -3573,7 +3573,12 @@ bool NavEKF::getPosNED(Vector3f &pos) const
 {
     pos.x = state.position.x;
     pos.y = state.position.y;
-    pos.z = state.position.z - flowStates[1];
+    // If relying on optical flow, then output ground relative position so that the vehicle does terain following
+    if (_fusionModeGPS == 3) {
+        pos.z = state.position.z - flowStates[1];
+    } else {
+        pos.z = state.position.z;
+    }
     return true;
 }
 
