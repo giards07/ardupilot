@@ -1041,6 +1041,25 @@ void DataFlash_Class::Log_Write_EKF(AP_AHRS_NavEKF &ahrs, bool optFlowEnabled)
          };
         WriteBlock(&pkt5, sizeof(pkt5));
     }
+
+        // Write sixth EKF packet
+        float tilt;
+        Vector3f angRateBias;
+        ahrs.get_NavEKF().NavEKF::getGimbalDebug(tilt, velNED, euler, angRateBias);
+        struct log_EKF6 pkt6 = {
+            LOG_PACKET_HEADER_INIT(LOG_EKF6_MSG),
+            tilt : (float)(tilt),
+            velN : (float)(velNED.x),
+            velE : (float)(velNED.y),
+            velD : (float)(velNED.z),
+            Roll : (float)(euler.x),
+            Pitch : (float)(euler.y),
+            Yaw : (float)(euler.z),
+            biasX : (float)(angRateBias.x),
+            biasY : (float)(angRateBias.y),
+            biasZ : (float)(angRateBias.z)
+         };
+        WriteBlock(&pkt6, sizeof(pkt6));
 }
 #endif
 
