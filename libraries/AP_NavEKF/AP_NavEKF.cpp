@@ -373,6 +373,8 @@ NavEKF::NavEKF(const AP_AHRS *ahrs, AP_Baro &baro) :
     _ahrs(ahrs),
     _baro(baro),
     state(*reinterpret_cast<struct state_elements *>(&states)),
+    // recast gimbal state vector so that it can also be used as a struct
+    gState(*reinterpret_cast<struct gStateElements *>(&gStates)),
     gpsNEVelVarAccScale(0.05f),     // Scale factor applied to horizontal velocity measurement variance due to manoeuvre acceleration
     gpsDVelVarAccScale(0.07f),      // Scale factor applied to vertical velocity measurement variance due to manoeuvre acceleration
     gpsPosVarAccScale(0.05f),       // Scale factor applied to horizontal position measurement variance due to manoeuvre acceleration
@@ -732,6 +734,9 @@ void NavEKF::UpdateFilter()
 
     // stop the timer used for load measurement
     perf_end(_perf_UpdateFilter);
+
+    // run the Gimbal EKF test harness
+    RunGimbalEKF();
 }
 
 // select fusion of velocity, position and height measurements
@@ -2652,7 +2657,7 @@ void NavEKF::EstimateTerrainOffset()
             float q3 = statesAtRngTime.quat[3]; // quaternion at optical flow measurement time
 
             // Set range finder measurement noise variance. TODO make this a function of range and tilt to allow for sensor, alignment and AHRS errors
-            float R_RNG = 0.5;
+            float R_RNG = 0.5f;
 
             // calculate Kalman gain
             float SK_RNG = sq(q0) - sq(q1) - sq(q2) + sq(q3);
@@ -4051,6 +4056,7 @@ void NavEKF::readMagData()
 
         // let other processes know that new compass data has arrived
         newDataMag = true;
+        newDataGimbalMag = true;
     } else {
         newDataMag = false;
     }
@@ -4673,5 +4679,843 @@ bool NavEKF::setOriginLLH(struct Location &loc)
     validOrigin = true;
     return true;
 }
+
+// run a 9-state EKF used to calculate gimbal orientation
+void NavEKF::RunGimbalEKF()
+{
+    // initialise variables and constants
+    if (!gimbalFiltInit) {
+        gimbalStartTime_ms =  imuSampleTime_ms;
+        newDataGimbalMag = false;
+        gimbalYawAligned = false;
+        gState.quat[0] = 1.0f;
+        float Sigma_velNED = 0.5f; // 1 sigma uncertainty in horizontal velocity components
+        float Sigma_dAngBias  = 0.01745f*dtIMU; // 1 Sigma uncertainty in delta angle bias
+        float Sigma_angErr = 1.0f; // 1 Sigma uncertainty in angular misalignment (rad)
+        for (uint8_t i=0; i <= 2; i++) gCov[i][i] = sq(Sigma_angErr);
+        for (uint8_t i=3; i <= 5; i++) gCov[i][i] = sq(Sigma_velNED);
+        for (uint8_t i=6; i <= 8; i++) gCov[i][i] = sq(Sigma_dAngBias);
+        gimbalFiltInit = true;
+        hal.console->printf("Gimbal Alignment Started\n");
+    }
+
+    // We are using the IMU data from the flight vehicle and setting gimbal joint angles to zero for the time being
+    gSense.gPsi = 0.0f;
+    gSense.gPhi = 0.0f;
+    gSense.gTheta = 0.0f;
+    cosPhi = cosf(gSense.gPhi);
+    cosTheta = cosf(gSense.gTheta);
+    sinPhi = sinf(gSense.gPhi);
+    sinTheta = sinf(gSense.gTheta);
+    sinPsi = sinf(gSense.gPsi);
+    cosPsi = cosf(gSense.gPsi);
+    gSense.delAng = dAngIMU;
+    gSense.delVel = dVelIMU1;
+
+    // predict gimbal states
+    predictGimbalStates();
+
+    // predict the covariance
+    predictGimbalCovariance();
+
+    // fuse NavEKF velocity data
+    fuseGimbalVelocity(gimbalYawAligned);
+
+    // Align the heading once there has been enough time for the filter to settle and the tilt corrections have dropped below a threshold
+    if ((((imuSampleTime_ms - gimbalStartTime_ms) > 5000 && gimbalTiltCorrection < 1e-4f) || ((imuSampleTime_ms - gimbalStartTime_ms) > 30000)) && !gimbalYawAligned) {
+        //calculate the initial heading using magnetometer, gimbal, estimated tilt and declination
+        alignGimbalHeading();
+        gimbalYawAligned = true;
+        hal.console->printf("Gimbal Alignment Completed\n");
+    }
+
+    // Fuse magnetometer data if  we have new measurements and an aligned heading
+    if(newDataGimbalMag && gimbalYawAligned) {
+        fuseGimbalCompass();
+        newDataGimbalMag = false;
+    }
+
+}
+
+// Gimbal state prediction
+void NavEKF::predictGimbalStates()
+{
+    static Vector3f gimDelAngCorrected;
+    static Vector3f gimDelAngPrev;
+
+    // NED gravity vector m/s^2
+    const Vector3f gravityNED(0, 0, GRAVITY_MSS);
+
+    // apply corrections for bias and coning errors
+    // % * - and + operators have been overloaded
+    gimDelAngCorrected   = gSense.delAng - gState.delAngBias - (gimDelAngPrev % gimDelAngCorrected) * 8.333333e-2f;
+    gimDelAngPrev        = gSense.delAng - gState.delAngBias;
+
+    // convert the rotation vector to its equivalent quaternion
+    float rotationMag = gimDelAngCorrected.length();
+    Quaternion deltaQuat;
+    if (rotationMag < 1e-6f)
+    {
+        deltaQuat[0] = 1.0f;
+        deltaQuat[1] = 0.0f;
+        deltaQuat[2] = 0.0f;
+        deltaQuat[3] = 0.0f;
+    }
+    else
+    {
+        deltaQuat[0] = cosf(0.5f * rotationMag);
+        float rotScaler = (sinf(0.5f * rotationMag)) / rotationMag;
+        deltaQuat[1] = gimDelAngCorrected.x * rotScaler;
+        deltaQuat[2] = gimDelAngCorrected.y * rotScaler;
+        deltaQuat[3] = gimDelAngCorrected.z * rotScaler;
+    }
+
+    // update the quaternions by rotating from the previous attitude through
+    // the delta angle rotation quaternion
+    gState.quat = QuatMult(gState.quat,deltaQuat);
+
+    // normalise the quaternions and update the quaternion states
+    gState.quat.normalize();
+
+    // calculate the sensor to NED cosine matrix
+    gState.quat.rotation_matrix(Tsn);
+
+    // transform body delta velocities to delta velocities in the nav frame
+    // * and + operators have been overloaded
+    Vector3f delVelNav  = Tsn*gSense.delVel + gravityNED*dtIMU;
+
+    // sum delta velocities to get velocity
+    gState.velocity += delVelNav;
+}
+
+// Gimbal covariance prediction using optimised algebraic toolbox expressions equivalent to P = F*P*transpose(P) + G*imu_errors*transpose(G) + gyro_bias_state_noise
+void NavEKF::predictGimbalCovariance()
+{
+    float delAngBiasVariance = sq(dtIMU*dtIMU*5E-4f);
+
+    float daxNoise = sq(dtIMU*0.0087f);
+    float dayNoise = sq(dtIMU*0.0087f);
+    float dazNoise = sq(dtIMU*0.0087f);
+
+    float dvxNoise = sq(dtIMU*0.5f);
+    float dvyNoise = sq(dtIMU*0.5f);
+    float dvzNoise = sq(dtIMU*0.5f);
+    float dvx = gSense.delVel.x;
+    float dvy = gSense.delVel.y;
+    float dvz = gSense.delVel.z;
+    float dax = gSense.delAng.x;
+    float day = gSense.delAng.y;
+    float daz = gSense.delAng.z;
+    float q0 = gState.quat[0];
+    float q1 = gState.quat[1];
+    float q2 = gState.quat[2];
+    float q3 = gState.quat[3];
+    float dax_b = gState.delAngBias.x;
+    float day_b = gState.delAngBias.y;
+    float daz_b = gState.delAngBias.z;
+    float t1365 = dax*0.5f;
+    float t1366 = dax_b*0.5f;
+    float t1367 = t1365-t1366;
+    float t1368 = day*0.5f;
+    float t1369 = day_b*0.5f;
+    float t1370 = t1368-t1369;
+    float t1371 = daz*0.5f;
+    float t1372 = daz_b*0.5f;
+    float t1373 = t1371-t1372;
+    float t1374 = q2*t1367*0.5f;
+    float t1375 = q1*t1370*0.5f;
+    float t1376 = q0*t1373*0.5f;
+    float t1377 = q2*0.5f;
+    float t1378 = q3*t1367*0.5f;
+    float t1379 = q1*t1373*0.5f;
+    float t1380 = q1*0.5f;
+    float t1381 = q0*t1367*0.5f;
+    float t1382 = q3*t1370*0.5f;
+    float t1383 = q0*0.5f;
+    float t1384 = q2*t1370*0.5f;
+    float t1385 = q3*t1373*0.5f;
+    float t1386 = q0*t1370*0.5f;
+    float t1387 = q3*0.5f;
+    float t1388 = q1*t1367*0.5f;
+    float t1389 = q2*t1373*0.5f;
+    float t1390 = t1374+t1375+t1376-t1387;
+    float t1391 = t1377+t1378+t1379-t1386;
+    float t1392 = q2*t1391*2.0f;
+    float t1393 = t1380+t1381+t1382-t1389;
+    float t1394 = q1*t1393*2.0f;
+    float t1395 = t1383+t1384+t1385-t1388;
+    float t1396 = q0*t1395*2.0f;
+    float t1403 = q3*t1390*2.0f;
+    float t1397 = t1392+t1394+t1396-t1403;
+    float t1398 = sq(q0);
+    float t1399 = sq(q1);
+    float t1400 = sq(q2);
+    float t1401 = sq(q3);
+    float t1402 = t1398+t1399+t1400+t1401;
+    float t1404 = t1374+t1375-t1376+t1387;
+    float t1405 = t1377-t1378+t1379+t1386;
+    float t1406 = q1*t1405*2.0f;
+    float t1407 = -t1380+t1381+t1382+t1389;
+    float t1408 = q2*t1407*2.0f;
+    float t1409 = t1383-t1384+t1385+t1388;
+    float t1410 = q3*t1409*2.0f;
+    float t1420 = q0*t1404*2.0f;
+    float t1411 = t1406+t1408+t1410-t1420;
+    float t1412 = -t1377+t1378+t1379+t1386;
+    float t1413 = q0*t1412*2.0f;
+    float t1414 = t1374-t1375+t1376+t1387;
+    float t1415 = t1383+t1384-t1385+t1388;
+    float t1416 = q2*t1415*2.0f;
+    float t1417 = t1380-t1381+t1382+t1389;
+    float t1418 = q3*t1417*2.0f;
+    float t1421 = q1*t1414*2.0f;
+    float t1419 = t1413+t1416+t1418-t1421;
+    float t1422 = gCov[0][0]*t1397;
+    float t1423 = gCov[1][0]*t1411;
+    float t1429 = gCov[6][0]*t1402;
+    float t1430 = gCov[2][0]*t1419;
+    float t1424 = t1422+t1423-t1429-t1430;
+    float t1425 = gCov[0][1]*t1397;
+    float t1426 = gCov[1][1]*t1411;
+    float t1427 = gCov[0][2]*t1397;
+    float t1428 = gCov[1][2]*t1411;
+    float t1434 = gCov[6][1]*t1402;
+    float t1435 = gCov[2][1]*t1419;
+    float t1431 = t1425+t1426-t1434-t1435;
+    float t1442 = gCov[6][2]*t1402;
+    float t1443 = gCov[2][2]*t1419;
+    float t1432 = t1427+t1428-t1442-t1443;
+    float t1433 = t1398+t1399-t1400-t1401;
+    float t1436 = q0*q2*2.0f;
+    float t1437 = q1*q3*2.0f;
+    float t1438 = t1436+t1437;
+    float t1439 = q0*q3*2.0f;
+    float t1441 = q1*q2*2.0f;
+    float t1440 = t1439-t1441;
+    float t1444 = t1398-t1399+t1400-t1401;
+    float t1445 = q0*q1*2.0f;
+    float t1449 = q2*q3*2.0f;
+    float t1446 = t1445-t1449;
+    float t1447 = t1439+t1441;
+    float t1448 = t1398-t1399-t1400+t1401;
+    float t1450 = t1445+t1449;
+    float t1451 = t1436-t1437;
+    float t1452 = gCov[0][6]*t1397;
+    float t1453 = gCov[1][6]*t1411;
+    float t1628 = gCov[6][6]*t1402;
+    float t1454 = t1452+t1453-t1628-gCov[2][6]*t1419;
+    float t1455 = gCov[0][7]*t1397;
+    float t1456 = gCov[1][7]*t1411;
+    float t1629 = gCov[6][7]*t1402;
+    float t1457 = t1455+t1456-t1629-gCov[2][7]*t1419;
+    float t1458 = gCov[0][8]*t1397;
+    float t1459 = gCov[1][8]*t1411;
+    float t1630 = gCov[6][8]*t1402;
+    float t1460 = t1458+t1459-t1630-gCov[2][8]*t1419;
+    float t1461 = q0*t1390*2.0f;
+    float t1462 = q1*t1391*2.0f;
+    float t1463 = q3*t1395*2.0f;
+    float t1473 = q2*t1393*2.0f;
+    float t1464 = t1461+t1462+t1463-t1473;
+    float t1465 = q0*t1409*2.0f;
+    float t1466 = q2*t1405*2.0f;
+    float t1467 = q3*t1404*2.0f;
+    float t1474 = q1*t1407*2.0f;
+    float t1468 = t1465+t1466+t1467-t1474;
+    float t1469 = q1*t1415*2.0f;
+    float t1470 = q2*t1414*2.0f;
+    float t1471 = q3*t1412*2.0f;
+    float t1475 = q0*t1417*2.0f;
+    float t1472 = t1469+t1470+t1471-t1475;
+    float t1476 = gCov[7][0]*t1402;
+    float t1477 = gCov[0][0]*t1464;
+    float t1486 = gCov[1][0]*t1468;
+    float t1487 = gCov[2][0]*t1472;
+    float t1478 = t1476+t1477-t1486-t1487;
+    float t1479 = gCov[7][1]*t1402;
+    float t1480 = gCov[0][1]*t1464;
+    float t1492 = gCov[1][1]*t1468;
+    float t1493 = gCov[2][1]*t1472;
+    float t1481 = t1479+t1480-t1492-t1493;
+    float t1482 = gCov[7][2]*t1402;
+    float t1483 = gCov[0][2]*t1464;
+    float t1498 = gCov[1][2]*t1468;
+    float t1499 = gCov[2][2]*t1472;
+    float t1484 = t1482+t1483-t1498-t1499;
+    float t1485 = sq(t1402);
+    float t1488 = q1*t1390*2.0f;
+    float t1489 = q2*t1395*2.0f;
+    float t1490 = q3*t1393*2.0f;
+    float t1533 = q0*t1391*2.0f;
+    float t1491 = t1488+t1489+t1490-t1533;
+    float t1494 = q0*t1407*2.0f;
+    float t1495 = q1*t1409*2.0f;
+    float t1496 = q2*t1404*2.0f;
+    float t1534 = q3*t1405*2.0f;
+    float t1497 = t1494+t1495+t1496-t1534;
+    float t1500 = q0*t1415*2.0f;
+    float t1501 = q1*t1417*2.0f;
+    float t1502 = q3*t1414*2.0f;
+    float t1535 = q2*t1412*2.0f;
+    float t1503 = t1500+t1501+t1502-t1535;
+    float t1504 = dvy*t1433;
+    float t1505 = dvx*t1440;
+    float t1506 = t1504+t1505;
+    float t1507 = dvx*t1438;
+    float t1508 = dvy*t1438;
+    float t1509 = dvz*t1440;
+    float t1510 = t1508+t1509;
+    float t1511 = dvx*t1444;
+    float t1551 = dvy*t1447;
+    float t1512 = t1511-t1551;
+    float t1513 = dvz*t1444;
+    float t1514 = dvy*t1446;
+    float t1515 = t1513+t1514;
+    float t1516 = dvx*t1446;
+    float t1517 = dvz*t1447;
+    float t1518 = t1516+t1517;
+    float t1519 = dvx*t1448;
+    float t1520 = dvz*t1451;
+    float t1521 = t1519+t1520;
+    float t1522 = dvy*t1448;
+    float t1552 = dvz*t1450;
+    float t1523 = t1522-t1552;
+    float t1524 = dvx*t1450;
+    float t1525 = dvy*t1451;
+    float t1526 = t1524+t1525;
+    float t1527 = gCov[7][6]*t1402;
+    float t1528 = gCov[0][6]*t1464;
+    float t1529 = gCov[7][7]*t1402;
+    float t1530 = gCov[0][7]*t1464;
+    float t1531 = gCov[7][8]*t1402;
+    float t1532 = gCov[0][8]*t1464;
+    float t1536 = gCov[8][0]*t1402;
+    float t1537 = gCov[1][0]*t1497;
+    float t1545 = gCov[0][0]*t1491;
+    float t1546 = gCov[2][0]*t1503;
+    float t1538 = t1536+t1537-t1545-t1546;
+    float t1539 = gCov[8][1]*t1402;
+    float t1540 = gCov[1][1]*t1497;
+    float t1547 = gCov[0][1]*t1491;
+    float t1548 = gCov[2][1]*t1503;
+    float t1541 = t1539+t1540-t1547-t1548;
+    float t1542 = gCov[8][2]*t1402;
+    float t1543 = gCov[1][2]*t1497;
+    float t1549 = gCov[0][2]*t1491;
+    float t1550 = gCov[2][2]*t1503;
+    float t1544 = t1542+t1543-t1549-t1550;
+    float t1553 = gCov[8][6]*t1402;
+    float t1554 = gCov[1][6]*t1497;
+    float t1555 = gCov[8][7]*t1402;
+    float t1556 = gCov[1][7]*t1497;
+    float t1557 = gCov[8][8]*t1402;
+    float t1558 = gCov[1][8]*t1497;
+    float t1560 = dvz*t1433;
+    float t1559 = t1507-t1560;
+    float t1561 = gCov[0][0]*t1510;
+    float t1567 = gCov[2][0]*t1506;
+    float t1568 = gCov[1][0]*t1559;
+    float t1562 = gCov[3][0]+t1561-t1567-t1568;
+    float t1563 = gCov[0][1]*t1510;
+    float t1569 = gCov[2][1]*t1506;
+    float t1570 = gCov[1][1]*t1559;
+    float t1564 = gCov[3][1]+t1563-t1569-t1570;
+    float t1565 = gCov[0][2]*t1510;
+    float t1571 = gCov[2][2]*t1506;
+    float t1572 = gCov[1][2]*t1559;
+    float t1566 = gCov[3][2]+t1565-t1571-t1572;
+    float t1573 = -t1507+t1560;
+    float t1574 = gCov[1][0]*t1573;
+    float t1575 = gCov[3][0]+t1561-t1567+t1574;
+    float t1576 = gCov[1][1]*t1573;
+    float t1577 = gCov[3][1]+t1563-t1569+t1576;
+    float t1578 = gCov[1][2]*t1573;
+    float t1579 = gCov[3][2]+t1565-t1571+t1578;
+    float t1580 = gCov[0][6]*t1510;
+    float t1581 = gCov[0][7]*t1510;
+    float t1582 = gCov[0][8]*t1510;
+    float t1583 = gCov[1][0]*t1518;
+    float t1584 = gCov[2][0]*t1512;
+    float t1592 = gCov[0][0]*t1515;
+    float t1585 = gCov[4][0]+t1583+t1584-t1592;
+    float t1586 = gCov[1][1]*t1518;
+    float t1587 = gCov[2][1]*t1512;
+    float t1593 = gCov[0][1]*t1515;
+    float t1588 = gCov[4][1]+t1586+t1587-t1593;
+    float t1589 = gCov[1][2]*t1518;
+    float t1590 = gCov[2][2]*t1512;
+    float t1594 = gCov[0][2]*t1515;
+    float t1591 = gCov[4][2]+t1589+t1590-t1594;
+    float t1595 = dvxNoise*t1433*t1447;
+    float t1596 = gCov[1][6]*t1518;
+    float t1597 = gCov[2][6]*t1512;
+    float t1598 = gCov[4][6]+t1596+t1597-gCov[0][6]*t1515;
+    float t1599 = gCov[1][7]*t1518;
+    float t1600 = gCov[2][7]*t1512;
+    float t1601 = gCov[4][7]+t1599+t1600-gCov[0][7]*t1515;
+    float t1602 = gCov[1][8]*t1518;
+    float t1603 = gCov[2][8]*t1512;
+    float t1604 = gCov[4][8]+t1602+t1603-gCov[0][8]*t1515;
+    float t1605 = gCov[2][0]*t1526;
+    float t1606 = gCov[0][0]*t1523;
+    float t1614 = gCov[1][0]*t1521;
+    float t1607 = gCov[5][0]+t1605+t1606-t1614;
+    float t1608 = gCov[2][1]*t1526;
+    float t1609 = gCov[0][1]*t1523;
+    float t1615 = gCov[1][1]*t1521;
+    float t1610 = gCov[5][1]+t1608+t1609-t1615;
+    float t1611 = gCov[2][2]*t1526;
+    float t1612 = gCov[0][2]*t1523;
+    float t1616 = gCov[1][2]*t1521;
+    float t1613 = gCov[5][2]+t1611+t1612-t1616;
+    float t1617 = dvzNoise*t1438*t1448;
+    float t1618 = dvyNoise*t1444*t1450;
+    float t1619 = gCov[2][6]*t1526;
+    float t1620 = gCov[0][6]*t1523;
+    float t1621 = gCov[5][6]+t1619+t1620-gCov[1][6]*t1521;
+    float t1622 = gCov[2][7]*t1526;
+    float t1623 = gCov[0][7]*t1523;
+    float t1624 = gCov[5][7]+t1622+t1623-gCov[1][7]*t1521;
+    float t1625 = gCov[2][8]*t1526;
+    float t1626 = gCov[0][8]*t1523;
+    float t1627 = gCov[5][8]+t1625+t1626-gCov[1][8]*t1521;
+    float nextgCov[9][9];
+    nextgCov[0][0] = daxNoise*t1485+t1397*t1424+t1411*t1431-t1419*t1432-t1402*t1454;
+    nextgCov[1][0] = -t1397*t1478-t1411*t1481+t1419*t1484+t1402*(t1527+t1528-gCov[1][6]*t1468-gCov[2][6]*t1472);
+    nextgCov[2][0] = -t1397*t1538-t1411*t1541+t1419*t1544+t1402*(t1553+t1554-gCov[0][6]*t1491-gCov[2][6]*t1503);
+    nextgCov[3][0] = -t1402*(gCov[3][6]+t1580-gCov[2][6]*t1506-gCov[1][6]*t1559)+t1397*t1562+t1411*t1564-t1419*t1566;
+    nextgCov[4][0] = t1397*t1585+t1411*t1588-t1402*t1598-t1419*t1591;
+    nextgCov[5][0] = t1397*t1607+t1411*t1610-t1402*t1621-t1419*t1613;
+    nextgCov[6][0] = -t1628+gCov[6][0]*t1397+gCov[6][1]*t1411-gCov[6][2]*t1419;
+    nextgCov[7][0] = -t1527+gCov[7][0]*t1397+gCov[7][1]*t1411-gCov[7][2]*t1419;
+    nextgCov[8][0] = -t1553+gCov[8][0]*t1397+gCov[8][1]*t1411-gCov[8][2]*t1419;
+    nextgCov[0][1] = -t1402*t1457-t1424*t1464+t1431*t1468+t1432*t1472;
+    nextgCov[1][1] = dayNoise*t1485+t1464*t1478-t1468*t1481-t1472*t1484+t1402*(t1529+t1530-gCov[1][7]*t1468-gCov[2][7]*t1472);
+    nextgCov[2][1] = t1464*t1538-t1468*t1541-t1472*t1544+t1402*(t1555+t1556-gCov[0][7]*t1491-gCov[2][7]*t1503);
+    nextgCov[3][1] = -t1402*(gCov[3][7]+t1581-gCov[2][7]*t1506-gCov[1][7]*t1559)-t1464*t1562+t1468*t1564+t1472*t1566;
+    nextgCov[4][1] = -t1402*t1601-t1464*t1585+t1468*t1588+t1472*t1591;
+    nextgCov[5][1] = -t1402*t1624-t1464*t1607+t1468*t1610+t1472*t1613;
+    nextgCov[6][1] = -t1629-gCov[6][0]*t1464+gCov[6][1]*t1468+gCov[6][2]*t1472;
+    nextgCov[7][1] = -t1529-gCov[7][0]*t1464+gCov[7][1]*t1468+gCov[7][2]*t1472;
+    nextgCov[8][1] = -t1555-gCov[8][0]*t1464+gCov[8][1]*t1468+gCov[8][2]*t1472;
+    nextgCov[0][2] = -t1402*t1460-t1431*t1497+t1432*t1503+t1491*(t1422+t1423-t1429-t1430);
+    nextgCov[1][2] = -t1478*t1491+t1481*t1497-t1484*t1503+t1402*(t1531+t1532-gCov[1][8]*t1468-gCov[2][8]*t1472);
+    nextgCov[2][2] = dazNoise*t1485-t1491*t1538+t1497*t1541-t1503*t1544+t1402*(t1557+t1558-gCov[0][8]*t1491-gCov[2][8]*t1503);
+    nextgCov[3][2] = -t1402*(gCov[3][8]+t1582-gCov[2][8]*t1506-gCov[1][8]*t1559)+t1491*t1562-t1497*t1564+t1503*t1566;
+    nextgCov[4][2] = -t1402*t1604+t1491*t1585-t1497*t1588+t1503*t1591;
+    nextgCov[5][2] = -t1402*t1627+t1491*t1607-t1497*t1610+t1503*t1613;
+    nextgCov[6][2] = -t1630+gCov[6][0]*t1491-gCov[6][1]*t1497+gCov[6][2]*t1503;
+    nextgCov[7][2] = -t1531+gCov[7][0]*t1491-gCov[7][1]*t1497+gCov[7][2]*t1503;
+    nextgCov[8][2] = -t1557+gCov[8][0]*t1491-gCov[8][1]*t1497+gCov[8][2]*t1503;
+    nextgCov[0][3] = gCov[0][3]*t1397+gCov[1][3]*t1411-gCov[2][3]*t1419-gCov[6][3]*t1402-t1432*t1506+t1510*(t1422+t1423-t1429-t1430)-t1559*(t1425+t1426-t1434-t1435);
+    nextgCov[1][3] = -gCov[0][3]*t1464-gCov[7][3]*t1402+gCov[1][3]*t1468+gCov[2][3]*t1472-t1478*t1510+t1484*t1506+t1481*t1559;
+    nextgCov[2][3] = -gCov[8][3]*t1402+gCov[0][3]*t1491-gCov[1][3]*t1497+gCov[2][3]*t1503-t1510*t1538+t1506*t1544+t1541*t1559;
+    nextgCov[3][3] = gCov[3][3]+gCov[0][3]*t1510-gCov[2][3]*t1506+gCov[1][3]*t1573-t1506*t1566+t1510*t1575+t1573*t1577+dvxNoise*sq(t1433)+dvyNoise*sq(t1440)+dvzNoise*sq(t1438);
+    nextgCov[4][3] = gCov[4][3]+t1595-gCov[0][3]*t1515+gCov[1][3]*t1518+gCov[2][3]*t1512+t1510*t1585-t1506*t1591+t1573*t1588-dvyNoise*t1440*t1444-dvzNoise*t1438*t1446;
+    nextgCov[5][3] = gCov[5][3]+t1617+gCov[0][3]*t1523-gCov[1][3]*t1521+gCov[2][3]*t1526+t1510*t1607-t1506*t1613+t1573*t1610-dvxNoise*t1433*t1451-dvyNoise*t1440*t1450;
+    nextgCov[6][3] = gCov[6][3]-gCov[6][2]*t1506+gCov[6][0]*t1510+gCov[6][1]*t1573;
+    nextgCov[7][3] = gCov[7][3]-gCov[7][2]*t1506+gCov[7][0]*t1510+gCov[7][1]*t1573;
+    nextgCov[8][3] = gCov[8][3]-gCov[8][2]*t1506+gCov[8][0]*t1510+gCov[8][1]*t1573;
+    nextgCov[0][4] = gCov[0][4]*t1397+gCov[1][4]*t1411-gCov[2][4]*t1419-gCov[6][4]*t1402-t1424*t1515+t1432*t1512+t1518*(t1425+t1426-t1434-t1435);
+    nextgCov[1][4] = -gCov[0][4]*t1464-gCov[7][4]*t1402+gCov[1][4]*t1468+gCov[2][4]*t1472+t1478*t1515-t1484*t1512-t1481*t1518;
+    nextgCov[2][4] = -gCov[8][4]*t1402+gCov[0][4]*t1491-gCov[1][4]*t1497+gCov[2][4]*t1503+t1515*t1538-t1512*t1544-t1518*t1541;
+    nextgCov[3][4] = gCov[3][4]+t1595+gCov[0][4]*t1510-gCov[2][4]*t1506+gCov[1][4]*t1573-t1515*t1575+t1512*t1579+t1518*t1577-dvyNoise*t1440*t1444-dvzNoise*t1438*t1446;
+    nextgCov[4][4] = gCov[4][4]-gCov[0][4]*t1515+gCov[1][4]*t1518+gCov[2][4]*t1512-t1515*t1585+t1512*t1591+t1518*t1588+dvxNoise*sq(t1447)+dvyNoise*sq(t1444)+dvzNoise*sq(t1446);
+    nextgCov[5][4] = gCov[5][4]+t1618+gCov[0][4]*t1523-gCov[1][4]*t1521+gCov[2][4]*t1526-t1515*t1607+t1512*t1613+t1518*t1610-dvxNoise*t1447*t1451-dvzNoise*t1446*t1448;
+    nextgCov[6][4] = gCov[6][4]+gCov[6][2]*t1512-gCov[6][0]*t1515+gCov[6][1]*t1518;
+    nextgCov[7][4] = gCov[7][4]+gCov[7][2]*t1512-gCov[7][0]*t1515+gCov[7][1]*t1518;
+    nextgCov[8][4] = gCov[8][4]+gCov[8][2]*t1512-gCov[8][0]*t1515+gCov[8][1]*t1518;
+    nextgCov[0][5] = gCov[0][5]*t1397+gCov[1][5]*t1411-gCov[2][5]*t1419-gCov[6][5]*t1402+t1424*t1523-t1431*t1521+t1526*(t1427+t1428-t1442-t1443);
+    nextgCov[1][5] = -gCov[0][5]*t1464-gCov[7][5]*t1402+gCov[1][5]*t1468+gCov[2][5]*t1472-t1478*t1523+t1481*t1521-t1484*t1526;
+    nextgCov[2][5] = -gCov[8][5]*t1402+gCov[0][5]*t1491-gCov[1][5]*t1497+gCov[2][5]*t1503-t1523*t1538+t1521*t1541-t1526*t1544;
+    nextgCov[3][5] = gCov[3][5]+t1617+gCov[0][5]*t1510-gCov[2][5]*t1506+gCov[1][5]*t1573-t1521*t1577+t1523*t1575+t1526*t1579-dvxNoise*t1433*t1451-dvyNoise*t1440*t1450;
+    nextgCov[4][5] = gCov[4][5]+t1618-gCov[0][5]*t1515+gCov[1][5]*t1518+gCov[2][5]*t1512+t1523*t1585-t1521*t1588+t1526*t1591-dvxNoise*t1447*t1451-dvzNoise*t1446*t1448;
+    nextgCov[5][5] = gCov[5][5]+gCov[0][5]*t1523-gCov[1][5]*t1521+gCov[2][5]*t1526+t1523*t1607-t1521*t1610+t1526*t1613+dvxNoise*sq(t1451)+dvyNoise*sq(t1450)+dvzNoise*sq(t1448);
+    nextgCov[6][5] = gCov[6][5]-gCov[6][1]*t1521+gCov[6][0]*t1523+gCov[6][2]*t1526;
+    nextgCov[7][5] = gCov[7][5]-gCov[7][1]*t1521+gCov[7][0]*t1523+gCov[7][2]*t1526;
+    nextgCov[8][5] = gCov[8][5]-gCov[8][1]*t1521+gCov[8][0]*t1523+gCov[8][2]*t1526;
+    nextgCov[0][6] = t1454;
+    nextgCov[1][6] = -t1527-t1528+gCov[1][6]*t1468+gCov[2][6]*t1472;
+    nextgCov[2][6] = -t1553-t1554+gCov[0][6]*t1491+gCov[2][6]*t1503;
+    nextgCov[3][6] = gCov[3][6]+t1580-gCov[2][6]*t1506+gCov[1][6]*t1573;
+    nextgCov[4][6] = t1598;
+    nextgCov[5][6] = t1621;
+    nextgCov[6][6] = gCov[6][6];
+    nextgCov[7][6] = gCov[7][6];
+    nextgCov[8][6] = gCov[8][6];
+    nextgCov[0][7] = t1457;
+    nextgCov[1][7] = -t1529-t1530+gCov[1][7]*t1468+gCov[2][7]*t1472;
+    nextgCov[2][7] = -t1555-t1556+gCov[0][7]*t1491+gCov[2][7]*t1503;
+    nextgCov[3][7] = gCov[3][7]+t1581-gCov[2][7]*t1506+gCov[1][7]*t1573;
+    nextgCov[4][7] = t1601;
+    nextgCov[5][7] = t1624;
+    nextgCov[6][7] = gCov[6][7];
+    nextgCov[7][7] = gCov[7][7];
+    nextgCov[8][7] = gCov[8][7];
+    nextgCov[0][8] = t1460;
+    nextgCov[1][8] = -t1531-t1532+gCov[1][8]*t1468+gCov[2][8]*t1472;
+    nextgCov[2][8] = -t1557-t1558+gCov[0][8]*t1491+gCov[2][8]*t1503;
+    nextgCov[3][8] = gCov[3][8]+t1582-gCov[2][8]*t1506+gCov[1][8]*t1573;
+    nextgCov[4][8] = t1604;
+    nextgCov[5][8] = t1627;
+    nextgCov[6][8] = gCov[6][8];
+    nextgCov[7][8] = gCov[7][8];
+    nextgCov[8][8] = gCov[8][8];
+
+    // Add the gyro bias state noise
+    for (uint8_t i=6;i<=8;i++) {
+        nextgCov[i][i] = nextgCov[i][i] + delAngBiasVariance;
+    }
+
+    // copy predicted variances whilst constraining to be non-negative
+    for (uint8_t index=0; index<=8; index++) {
+        if (nextgCov[index][index] < 0.0f) {
+            gCov[index][index] = 0.0f;
+        } else {
+            gCov[index][index] = nextgCov[index][index];
+        }
+    }
+
+    // copy elements to covariance matrix whilst enforcing symmetry
+    for (uint8_t rowIndex=1; rowIndex<=8; rowIndex++) {
+        for (uint8_t colIndex=0; colIndex<=rowIndex-1; colIndex++) {
+            gCov[rowIndex][colIndex] = 0.5f*(nextgCov[rowIndex][colIndex] + nextgCov[colIndex][rowIndex]);
+            gCov[colIndex][rowIndex] = gCov[rowIndex][colIndex];
+        }
+    }
+
+}
+
+// Fuse the NavEKF velocity estimates - this enables alevel reference to be maintained during constant turns
+void NavEKF::fuseGimbalVelocity(bool yawInit)
+{
+    float R_OBS = 0.25f;
+    float innovation[3];
+    float varInnov[3];
+    Vector3f angErrVec;
+    uint8_t stateIndex;
+    float K[9];
+    // Fuse measurements sequentially
+    for (uint8_t obsIndex=0;obsIndex<=2;obsIndex++) {
+        stateIndex = 3 + obsIndex;
+
+        // Calculate the velocity measurement innovation using the NavEKF estimate as the observation
+        // if heading isn't aligned, use zero velocity (static assumption)
+        if (yawInit) {
+            innovation[obsIndex] = gState.velocity[obsIndex] - state.velocity[obsIndex];
+        } else {
+            innovation[obsIndex] = gState.velocity[obsIndex];
+        }
+
+        // Zero the attitude error states - they represent the incremental error so must be zero before corrections are applied
+        gState.angErr.zero();
+        // Calculate the innovation variance
+        varInnov[obsIndex] = gCov[stateIndex][stateIndex] + R_OBS;
+        // Calculate the Kalman gain and correct states, taking advantage of direct state observation
+        for (uint8_t rowIndex=0;rowIndex<=8;rowIndex++) {
+            K[rowIndex] = gCov[rowIndex][stateIndex]/varInnov[obsIndex];
+            gStates[rowIndex] -= K[rowIndex] * innovation[obsIndex];
+        }
+
+        // Store tilt error estimate for external monitoring
+        angErrVec = angErrVec + gState.angErr;
+
+        // the first 3 states represent the angular misalignment vector. This is
+        // is used to correct the estimated quaternion
+        // Convert the error rotation vector to its equivalent quaternion
+        // truth = estimate + error
+        float rotationMag = gState.angErr.length();
+        if (rotationMag > 1e-6f) {
+            Quaternion deltaQuat;
+            float temp = sinf(0.5f*rotationMag) / rotationMag;
+            deltaQuat[0] = cosf(0.5f*rotationMag);
+            deltaQuat[1] = gState.angErr.x*temp;
+            deltaQuat[2] = gState.angErr.y*temp;
+            deltaQuat[3] = gState.angErr.z*temp;
+
+            // Update the quaternion states by rotating from the previous attitude through the error quaternion
+            gState.quat = QuatMult(gState.quat,deltaQuat);
+
+            // re-normalise the quaternion
+            gState.quat.normalize();
+        }
+
+        // Update the covariance
+        for (uint8_t rowIndex=0;rowIndex<=8;rowIndex++) {
+            for (uint8_t colIndex=0;colIndex<=8;colIndex++) {
+                gCov[rowIndex][colIndex] = gCov[rowIndex][colIndex] - K[rowIndex]*gCov[stateIndex][colIndex];
+            }
+        }
+
+        // force symmetry and constrain diagonals to be non-negative
+        fixGimbalCovariance();
+    }
+
+    // calculate tilt component of angle correction
+    gimbalTiltCorrection = sqrtf(sq(angErrVec.x) + sq(angErrVec.y));
+}
+
+// Fuse compass measurements from autopilot
+void NavEKF::fuseGimbalCompass()
+{
+    float q0 = gState.quat[0];
+    float q1 = gState.quat[1];
+    float q2 = gState.quat[2];
+    float q3 = gState.quat[3];
+
+    float magX = magData.x;
+    float magY = magData.y;
+    float magZ = magData.z;
+
+    const float R_MAG = 3e-2f;
+
+    // Calculate observation Jacobian
+    float t5695 = sq(q0);
+    float t5696 = sq(q1);
+    float t5697 = sq(q2);
+    float t5698 = sq(q3);
+    float t5699 = t5695+t5696-t5697-t5698;
+    float t5702 = q0*q2*2.0f;
+    float t5703 = q1*q3*2.0f;
+    float t5704 = t5702+t5703;
+    float t5705 = q0*q3*2.0f;
+    float t5707 = q1*q2*2.0f;
+    float t5706 = t5705-t5707;
+    float t5708 = cosTheta*sinPsi;
+    float t5709 = sinPhi*sinTheta*cosPsi;
+    float t5710 = t5708+t5709;
+    float t5711 = t5705+t5707;
+    float t5712 = sinTheta*sinPsi;
+    float t5730 = cosTheta*sinPhi*cosPsi;
+    float t5713 = t5712-t5730;
+    float t5714 = q0*q1*2.0f;
+    float t5720 = q2*q3*2.0f;
+    float t5715 = t5714-t5720;
+    float t5716 = t5695-t5696+t5697-t5698;
+    float t5717 = sinTheta*cosPsi;
+    float t5718 = cosTheta*sinPhi*sinPsi;
+    float t5719 = t5717+t5718;
+    float t5721 = cosTheta*cosPsi;
+    float t5735 = sinPhi*sinTheta*sinPsi;
+    float t5722 = t5721-t5735;
+    float t5724 = sinPhi*t5706;
+    float t5725 = cosPhi*sinTheta*t5699;
+    float t5726 = cosPhi*cosTheta*t5704;
+    float t5727 = t5724+t5725-t5726;
+    float t5728 = magZ*t5727;
+    float t5729 = t5699*t5710;
+    float t5731 = t5704*t5713;
+    float t5732 = cosPhi*cosPsi*t5706;
+    float t5733 = t5729+t5731-t5732;
+    float t5734 = magY*t5733;
+    float t5736 = t5699*t5722;
+    float t5737 = t5704*t5719;
+    float t5738 = cosPhi*sinPsi*t5706;
+    float t5739 = t5736+t5737+t5738;
+    float t5740 = magX*t5739;
+    float t5741 = -t5728+t5734+t5740;
+    float t5742 = 1.0f/t5741;
+    float t5743 = sinPhi*t5716;
+    float t5744 = cosPhi*cosTheta*t5715;
+    float t5745 = cosPhi*sinTheta*t5711;
+    float t5746 = -t5743+t5744+t5745;
+    float t5747 = magZ*t5746;
+    float t5748 = t5710*t5711;
+    float t5749 = t5713*t5715;
+    float t5750 = cosPhi*cosPsi*t5716;
+    float t5751 = t5748-t5749+t5750;
+    float t5752 = magY*t5751;
+    float t5753 = t5715*t5719;
+    float t5754 = t5711*t5722;
+    float t5755 = cosPhi*sinPsi*t5716;
+    float t5756 = t5753-t5754+t5755;
+    float t5757 = magX*t5756;
+    float t5758 = t5747-t5752+t5757;
+    float t5759 = t5742*t5758;
+    float t5723 = tan(t5759);
+    float t5760 = sq(t5723);
+    float t5761 = t5760+1.0f;
+    float t5762 = 1.0f/sq(t5741);
+    float H_MAG[3];
+    H_MAG[0] = -t5761*(t5742*(magZ*(sinPhi*t5715+cosPhi*cosTheta*t5716)+magY*(t5713*t5716+cosPhi*cosPsi*t5715)+magX*(t5716*t5719-cosPhi*sinPsi*t5715))-t5758*t5762*(magZ*(sinPhi*t5704+cosPhi*cosTheta*t5706)+magY*(t5706*t5713+cosPhi*cosPsi*t5704)+magX*(t5706*t5719-cosPhi*sinPsi*t5704)));
+    H_MAG[1] =  t5761*(t5742*(magZ*(cosPhi*cosTheta*t5711-cosPhi*sinTheta*t5715)+magY*(t5711*t5713+t5710*t5715)+magX*(t5711*t5719+t5715*t5722))+t5758*t5762*(magZ*(cosPhi*cosTheta*t5699+cosPhi*sinTheta*t5704)+magY*(t5699*t5713-t5704*t5710)+magX*(t5699*t5719-t5704*t5722)));
+    H_MAG[2] =  t5761*(t5742*(-magZ*(sinPhi*t5711+cosPhi*sinTheta*t5716)+magY*(t5710*t5716-cosPhi*cosPsi*t5711)+magX*(t5716*t5722+cosPhi*sinPsi*t5711))-t5758*t5762*(magZ*(sinPhi*t5699-cosPhi*sinTheta*t5706)+magY*(t5706*t5710+cosPhi*t5699*cosPsi)+magX*(t5706*t5722-cosPhi*t5699*sinPsi)));
+
+    // Calculate innovation variance and Kalman gains, taking advantage of the fact that only the first 3 elements in H are non zero
+    float PH[3];
+    float varInnov = R_MAG;
+    for (uint8_t rowIndex=0;rowIndex<=2;rowIndex++) {
+        PH[rowIndex] = 0.0f;
+        for (uint8_t colIndex=0;colIndex<=2;colIndex++) {
+            PH[rowIndex] += gCov[rowIndex][colIndex]*H_MAG[colIndex];
+        }
+        varInnov += H_MAG[rowIndex]*PH[rowIndex];
+    }
+    float K_MAG[9];
+    float varInnovInv = 1.0f / varInnov;
+    for (uint8_t rowIndex=0;rowIndex<=8;rowIndex++) {
+        K_MAG[rowIndex] = 0.0f;
+        for (uint8_t colIndex=0;colIndex<=2;colIndex++) {
+            K_MAG[rowIndex] += gCov[rowIndex][colIndex]*H_MAG[colIndex];
+        }
+        K_MAG[rowIndex] *= varInnovInv;
+    }
+
+    // Calculate the innovation
+    float innovation = calcMagHeadingInnov();
+
+    // limit the innovation so that initial corrections are not too large
+    if (innovation > 0.5f) {
+        innovation = 0.5f;
+    } else if (innovation < -0.5f) {
+        innovation = -0.5f;
+    }
+
+    // correct the state vector
+    gState.angErr.zero();
+    for (uint8_t i=0;i<=8;i++) {
+        gStates[i] -= K_MAG[i] * innovation;
+    }
+
+    // the first 3 states represent the angular error vector where truth = estimate + error. This is is used to correct the estimated quaternion
+    float rotationMag = gState.angErr.length();
+    if (rotationMag > 1e-6f) {
+        // Convert the error rotation vector to its equivalent quaternion
+        Quaternion deltaQuat;
+        float temp = sinf(0.5f*rotationMag) / rotationMag;
+        deltaQuat[0] = cosf(0.5f*rotationMag);
+        deltaQuat[1] = gState.angErr.x*temp;
+        deltaQuat[2] = gState.angErr.y*temp;
+        deltaQuat[3] = gState.angErr.z*temp;
+
+        // Bring the quaternion state estimate back to 'truth' by adding the error
+        gState.quat = QuatMult(gState.quat,deltaQuat);
+
+        // re-normalise the quaternion
+        gState.quat.normalize();
+    }
+
+    // correct the covariance using P = P - K*H*P taking advantage of the fact that only the first 3 elements in H are non zero
+    float HP[9];
+    for (uint8_t colIndex=0;colIndex<=8;colIndex++) {
+        HP[colIndex] = 0.0f;
+        for (uint8_t rowIndex=0;rowIndex<=2;rowIndex++) {
+            HP[colIndex] += H_MAG[rowIndex]*gCov[rowIndex][colIndex];
+        }
+    }
+    for (uint8_t rowIndex=0;rowIndex<=8;rowIndex++) {
+        for (uint8_t colIndex=0;colIndex<=8;colIndex++) {
+            gCov[rowIndex][colIndex] -= K_MAG[rowIndex] * HP[colIndex];
+        }
+    }
+
+    // force symmetry and constrain diagonals to be non-negative
+    fixGimbalCovariance();
+}
+
+// Perform an initial heading alignment using the magnetic field and assumed declination
+void NavEKF::alignGimbalHeading()
+{
+    // calculate the correction rotation vector in NED frame
+    Vector3f deltaRotNED;
+    deltaRotNED.z = -calcMagHeadingInnov();
+
+    // rotate into sensor frame
+    Vector3f angleCorrection = Tsn.transposed()*deltaRotNED;
+
+    // apply the correction to the quaternion state
+    float rotationMag = deltaRotNED.length();
+    if (rotationMag > 1e-6f) {
+        // Convert the error rotation vector to its equivalent quaternion
+        Quaternion deltaQuat;
+        float temp = sinf(0.5f*rotationMag) / rotationMag;
+        deltaQuat[0] = cosf(0.5f*rotationMag);
+        deltaQuat[1] = angleCorrection.x*temp;
+        deltaQuat[2] = angleCorrection.y*temp;
+        deltaQuat[3] = angleCorrection.z*temp;
+
+        // Bring the quaternion state estimate back to 'truth' by adding the error
+        gState.quat = QuatMult(gState.quat,deltaQuat);
+
+        // re-normalise the quaternion
+        gState.quat.normalize();
+    }
+}
+
+
+// Calculate magnetic heading innovation
+float NavEKF::calcMagHeadingInnov()
+{
+    // Define rotation from magnetometer to sensor using a 312 rotation sequence
+    Matrix3f Tms;
+    Tms[0][0] = cosTheta*cosPsi-sinPsi*sinPhi*sinTheta;
+    Tms[1][0] = -sinPsi*cosPhi;
+    Tms[2][0] = cosPsi*sinTheta+cosTheta*sinPsi*sinPhi;
+    Tms[0][1] = cosTheta*sinPsi+cosPsi*sinPhi*sinTheta;
+    Tms[1][1] = cosPsi*cosPhi;
+    Tms[2][1] = sinPsi*sinTheta-cosTheta*cosPsi*sinPhi;
+    Tms[0][2] = -sinTheta*cosPhi;
+    Tms[1][2] = sinPhi;
+    Tms[2][2] = cosTheta*cosPhi;
+    // Define rotation from magnetometer to NED axes
+    Matrix3f Tmn = Tsn*Tms;
+    // rotate magentic field measured at top plate into NED axes afer applying bias values learnt by NavEKF
+    Vector3f magMeasNED = Tmn*(magData - state.body_magfield);
+    // the predicted measurement is the angle wrt magnetic north of the horizontal component of the measured field
+    float innovation = atan2(magMeasNED.y,magMeasNED.x) - atan2(state.earth_magfield.y,state.earth_magfield.x);
+
+    // Unwrap the innovation so it sits on the range from +-pi
+    if (innovation > 3.1415927f) {
+        innovation = innovation - 6.2831853f;
+    } else if (innovation < -3.1415927f) {
+        innovation = innovation + 6.2831853f;
+    }
+
+    return innovation;
+}
+
+// Force symmmetry and non-negative diagonals on gimbal state covarinace matrix
+void NavEKF::fixGimbalCovariance()
+{
+    // force symmetry
+    for (uint8_t rowIndex=1; rowIndex<=8; rowIndex++) {
+        for (uint8_t colIndex=0; colIndex<=rowIndex-1; colIndex++) {
+            gCov[rowIndex][colIndex] = 0.5f*(gCov[rowIndex][colIndex] + gCov[colIndex][rowIndex]);
+            gCov[colIndex][rowIndex] = gCov[rowIndex][colIndex];
+        }
+    }
+
+    // constrain diagonals to be non-negative
+    for (uint8_t index=1; index<=8; index++) {
+        if (gCov[index][index] < 0.0f) {
+            gCov[index][index] = 0.0f;
+        }
+    }
+}
+
+// Multiply two quaternions
+Quaternion NavEKF::QuatMult(Quaternion &q1, Quaternion &q2)
+{
+    Quaternion qOut;
+    qOut[0] = q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2] - q1[3]*q2[3];
+    qOut[1] = q1[0]*q2[1] + q1[1]*q2[0] + q1[2]*q2[3] - q1[3]*q2[2];
+    qOut[2] = q1[0]*q2[2] + q1[2]*q2[0] + q1[3]*q2[1] - q1[1]*q2[3];
+    qOut[3] = q1[0]*q2[3] + q1[3]*q2[0] + q1[1]*q2[2] - q1[2]*q2[1];
+    return qOut;
+}
+
+// return data for debugging gimbal EKF
+void NavEKF::getGimbalDebug(float &tilt, Vector3f &velocity, Vector3f &euler, Vector3f &gyroBias) const
+{
+    tilt = gimbalTiltCorrection;
+    velocity = gState.velocity;
+    gState.quat.to_euler(euler.x, euler.y, euler.z);
+    euler.x = degrees(euler.x);
+    euler.y = degrees(euler.y);
+    euler.z = degrees(euler.z);
+    if (euler.z < 0) euler.z += 360.0f;
+    gyroBias = gState.delAngBias*dtIMUinv;
+}
+
 
 #endif // HAL_CPU_CLASS

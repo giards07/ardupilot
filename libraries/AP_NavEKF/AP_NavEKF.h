@@ -193,6 +193,9 @@ public:
     // return data for debugging optical flow fusion
     void getFlowDebug(float &varFlow, float &gndOffset, float &flowInnovX, float &flowInnovY, float &auxInnov, float &HAGL, float &rngInnov, float &range, float &gndOffsetErr) const;
 
+    // return data for debugging gimbal EKF
+    void getGimbalDebug(float &tilt, Vector3f &velocity, Vector3f &euler, Vector3f &gyroBias) const;
+
     /*
     return the filter fault status as a bitmasked integer
      0 = quaternions are NaN
@@ -727,6 +730,76 @@ private:
     
     // should we assume zero sideslip?
     bool assume_zero_sideslip(void) const;
+
+    // 9-state gimbal EKF prototype additions
+
+    // data from gimbal
+    struct {
+        Vector3f delAng;
+        Vector3f delVel;
+        float gPhi;
+        float gPsi;
+        float gTheta;
+            } gSense;
+
+    // data to gimbal
+    struct {
+        Quaternion quat;
+        Vector3f gyroBias;
+            } gSoln;
+
+    // the states are available in two forms, either as a Vector13 or
+    // broken down as individual elements. Both are equivalent (same
+    // memory)
+    Vector13 gStates;
+    struct gStateElements {
+        Vector3f    angErr;         // 0..2 rotation vector representing the growth in angle error since the last state correction (rad)
+        Vector3f    velocity;       // 3..5 NED velocity (m/s)
+        Vector3f    delAngBias;     // 6..8 estimated bias errors in the IMU delta angles
+        Quaternion  quat;           // 9..12 these states are used by the INS prediction only and are not used by the EKF state equations.
+    } &gState;
+
+    float gCov[9][9];               // gimbal covariance matrix
+    Matrix3f Tsn;                   // Sensor to NED rotation matrix
+    float gimbalTiltCorrection;     // Angle correction applied to gimbal tilt from last velocity fusion (rad)
+    bool newDataGimbalMag;          // true when new magnetometer data is waiting to be used
+    uint32_t gimbalStartTime_ms;    // time the gimbal EKF was started (msec)
+    bool gimbalFiltInit;            // true when gimbal EKF is initialised
+    bool gimbalYawAligned;          // true when gimbal EKF heading is initialised
+    float cosPhi;// = cosf(gSense.gPhi);
+    float cosTheta;// = cosf(gSense.gTheta);
+    float sinPhi;// = sinf(gSense.gPhi);
+    float sinTheta;// = sinf(gSense.gTheta);
+    float sinPsi;// = sinf(gSense.gPsi);
+    float cosPsi;// = cosf(gSense.gPsi);
+
+    // Run the gimbal EKF main loop once every time we receive sensor data from the gimbal
+    void RunGimbalEKF();
+
+    // Gimbal state prediction
+    void predictGimbalStates();
+
+    // Gimbal EKF covariance prediction
+    void predictGimbalCovariance();
+
+    // Gimbal EKF velocity fusion
+    void fuseGimbalVelocity(bool yawInit);
+
+    // Gimbal EKF compass fusion
+    void fuseGimbalCompass();
+
+    // Perform an initial heading alignment using the magnetic field and assumed declination
+    void alignGimbalHeading();
+
+    // Calculate magnetic heading innovation
+    float calcMagHeadingInnov();
+
+    // Force symmmetry and non-negative diagonals on gimbal state covarinace matrix
+    void fixGimbalCovariance();
+
+    // Multiply 2 quaternions
+    Quaternion QuatMult(Quaternion &q1, Quaternion &q2);
+
 };
 
 #if CONFIG_HAL_BOARD != HAL_BOARD_PX4 && CONFIG_HAL_BOARD != HAL_BOARD_VRBRAIN
