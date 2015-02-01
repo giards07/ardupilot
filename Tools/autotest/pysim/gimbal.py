@@ -47,7 +47,7 @@ class Gimbal3Axis(object):
         self.travelLimitGain = 20
 
         # true gyro bias
-        self.true_gyro_bias = Vector3()
+        self.true_gyro_bias = Vector3(radians(0.5),radians(-1.0),radians(1.5))
 
         ##################################
         # reporting variables. gimbal pushes these to vehicle code over MAVLink at approx 100Hz
@@ -184,7 +184,8 @@ class Gimbal3Axis(object):
         #    print("demandedGimbalRatesInertial ", demandedGimbalRatesInertial)
             
         # for the moment we will set gyros equal to demanded_angular_rate
-        self.gimbal_angular_rate = demRateRaw #demandedGimbalRatesInertial + self.true_gyro_bias - self.supplied_gyro_bias
+        # self.gimbal_angular_rate = demandedGimbalRatesInertial + self.true_gyro_bias - self.supplied_gyro_bias
+        self.gimbal_angular_rate = demRateRaw  + self.true_gyro_bias - self.supplied_gyro_bias
 
         # update rotation of the gimbal
         self.dcm.rotate(self.gimbal_angular_rate*delta_t)
@@ -219,6 +220,7 @@ class Gimbal3Axis(object):
             # calculate joint angles (euler312 order)
             Euler312 = Vector3(*self.dcm.to_euler312())
             print("Euler Angles 312 %6.1f %6.1f %6.1f" % (degrees(Euler312.z), degrees(Euler312.x), degrees(Euler312.y)))
+            #print('ekf_gyro_bias ', self.supplied_gyro_bias*degrees(1))
 
     def send_report(self):
         '''send a report to the vehicle control code over MAVLink'''
