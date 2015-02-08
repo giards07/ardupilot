@@ -47,6 +47,9 @@ public:
     // send a GIMBAL_REPORT message to the GCS
     virtual void send_gimbal_report(mavlink_channel_t chan);
 
+    // provide a vehicle yaw rate demand in rad/sec
+    virtual float vehicleYawRateDemand(void);
+
 private:
     // internal variables
     bool _initialised;              // true once the driver has been initialised
@@ -56,6 +59,25 @@ private:
 
     // keep last gimbal report
     mavlink_gimbal_report_t _gimbal_report;
+
+    // vehicle yaw rate demand
+    float vehicleYawRateDem;
+
+    // gain from angle error to gimbal rate demand
+    float const K_gimbalRate = 1.0f;
+
+    // gain from angle error to vehicle yaw rate demand
+    float const K_vehicleRate = 1.0f;
+
+    // maximum gimbal angular rate in rad/sec
+    float const angRateLimit = 0.5f;
+
+    // maximum vehicle yaw rate in rad/sec
+    float const vehYawRateLim = 1.0f;
+
+    // gimbal yaw offset relative to vehicle reference frame in radians, used to centre relative to visual or mechanical limits
+    float const gimbalYawOffset = 0.03f;
+
 };
 #endif // AP_AHRS_NAVEKF_AVAILABLE
 

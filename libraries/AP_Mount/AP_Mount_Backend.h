@@ -68,6 +68,9 @@ public:
     // send a GIMBAL_REPORT message to the GCS
     virtual void send_gimbal_report(mavlink_channel_t chan) {}
 
+    // provide a yaw rate demand to allow the mount attitude control loop to control the vehicle yaw
+    virtual float vehicleYawRateDemand(void) { return 0.0f; }
+
 protected:
 
     // update_targets_from_rc - updates angle targets (i.e. _angle_ef_target_rad) using input from receiver

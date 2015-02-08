@@ -541,6 +541,23 @@ void AP_Mount::status_msg(mavlink_channel_t chan)
     }
 }
 
+// provide a yaw rate demand in rad/sec to allow the mount attitude control loop to control the vehicle yaw
+float AP_Mount::vehicleYawRateDemand(void)
+{
+    // combine yaw rate demand from all gimbals
+    float avg_yaw_rate_demand = 0.0f;
+
+    // call vehicleYawRateDemand for each instance
+    for (uint8_t instance=0; instance<AP_MOUNT_MAX_INSTANCES; instance++) {
+        if (_backends[instance] != NULL) {
+            avg_yaw_rate_demand += _backends[instance]->vehicleYawRateDemand();
+        }
+    }
+
+    // return average
+    return avg_yaw_rate_demand;
+}
+
 // set_roi_target - sets target location that mount should attempt to point towards
 void AP_Mount::set_roi_target(uint8_t instance, const struct Location &target_loc)
 {

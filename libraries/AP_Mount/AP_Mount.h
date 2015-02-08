@@ -119,6 +119,9 @@ public:
     // status_msg - called to allow mounts to send their status to GCS using the MOUNT_STATUS message
     void status_msg(mavlink_channel_t chan);
 
+    // provide a yaw rate demand in rad/sec to allow the mount attitude control loop to control the vehicle yaw
+    float vehicleYawRateDemand(void);
+
     // parameter var table
     static const struct AP_Param::GroupInfo        var_info[];
 
