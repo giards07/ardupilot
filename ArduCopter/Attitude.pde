@@ -87,7 +87,7 @@ static void get_yaw_rate_from_mount(AutoYawTarget& target)
     // default target to rate of zero
     target = {AutoYawTarget::AutoYawTargetMode_Rate, 0};
 #if MOUNT == ENABLED
-    target.heading_or_rate = 0;//camera_mount.vehicleYawRateDemand();
+    target.heading_or_rate = camera_mount.vehicleYawRateDemand();
 #endif
 }
 
