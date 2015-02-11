@@ -124,10 +124,10 @@ void AP_Mount_MAVLink::handle_gimbal_report(mavlink_channel_t chan, mavlink_mess
     Quaternion quatEst;
     _ekf.getQuat(quatEst);
 
-    // The gimbal control has two modes: earth relative pointing which is the default and a vehicle relative neutral position
+    // The gimbal control has two modes: slave mode where the gimbal yaw follows the copter and master mode where the copter yaw follows the gimbal
     // We calculate a gimbal rate vector demand and a vehicle yaw rate demand
     Vector3f gimbalRateDemVec;
-    if (_state._mode == MAV_MOUNT_MODE_NEUTRAL) { // align gimbal with vehicle axes
+    if (true) {//_state._mode == MAV_MOUNT_MODE_NEUTRAL) { // slave mode
 
         // Define rotation from vehicle to gimbal using a 312 rotation sequence
         Matrix3f Tvg;
@@ -147,25 +147,76 @@ void AP_Mount_MAVLink::handle_gimbal_report(mavlink_channel_t chan, mavlink_mess
         Tvg[1][2] = sinPhi;
         Tvg[2][2] = cosTheta*cosPhi;
 
-        // convert vehicle to gimbal rotation matrix to a rotation vector using small angle approximation
-        Vector3f deltaAngErr;
-        deltaAngErr.x = (Tvg[2][1] - Tvg[1][2]) * 0.5f;
-        deltaAngErr.y = (Tvg[0][2] - Tvg[2][0]) * 0.5f;
-        deltaAngErr.z = (Tvg[1][0] - Tvg[0][1]) * 0.5f;
+        // multiply the yaw joint angle by a gain to calculate a demanded vehicle frame relative rate vector required to keep the yaw joint centred
+        Vector3f gimbalRateDemVecYaw;
+        gimbalRateDemVecYaw.z = - K_gimbalRate * joint_angles.z;
 
-        // multiply the rotation vector by an error gain to calculate a demanded vehicle frame relative rate vector
-        gimbalRateDemVec = deltaAngErr * K_gimbalRate;
+        // constrain the vehicle relative yaw rate demand
+        gimbalRateDemVecYaw.z = constrain_float(gimbalRateDemVecYaw.z, -angRateLimit, angRateLimit);
 
-        // constrain the vehicle relative rate vector length
-        float length = gimbalRateDemVec.length();
-        if (length > angRateLimit) {
-            gimbalRateDemVec = gimbalRateDemVec * (angRateLimit / length);
+        // Add the vehicle yaw rate after filtering and scaling
+        // scaling is applied as a function of yaw rate such that the steady state error does not exceed the limit set
+        vehicleYawRateFilt = (1.0f - yawRateFiltPole * _gimbal_report.delta_time) * vehicleYawRateFilt + yawRateFiltPole * _gimbal_report.delta_time * _frontend._ahrs.get_gyro().z;
+        // calculate the maximum steady state rate error corresponding to the maximum permitted yaw angle error
+        float maxRate = K_gimbalRate * yawErrorLimit;
+        // compare max steady state rate error with vehicle yaw rate magnitude
+        float excessRateMag = fabs(vehicleYawRateFilt) - maxRate;
+        // if the difference is positive, then we need to use some forward rate demand to reduce steady state error
+        if (excessRateMag > 0.0f) {
+            if (vehicleYawRateFilt >= 0.0f) {
+                gimbalRateDemVecYaw.z += excessRateMag;
+            } else {
+                gimbalRateDemVecYaw.z -= excessRateMag;
+            }
         }
 
-        // rotate the earth relative vehicle angular rate vector into gimbal axes and add to obtain the demanded gimbal angular rate
-        gimbalRateDemVec += Tvg * _frontend._ahrs.get_gyro();
+        // rotate into gimbal frame to calculate the gimbal rate vector required to keep the yaw gimbal centred
+        gimbalRateDemVecYaw = Tvg * gimbalRateDemVecYaw;
 
-    } else { // align gimbal to earth relative demands
+        // Calculate the gimbal 321 Euler angle estimates relative to earth frame
+        Vector3f eulerEst;
+        quatEst.to_euler(eulerEst.x, eulerEst.y, eulerEst.z);
+
+        // Calculate a demanded quaternion using the demanded roll and pitch and estimated yaw (yaw is slaved to the vehicle)
+        Quaternion quatDem;
+        quatDem.from_euler(_angle_ef_target_rad.x,
+                           _angle_ef_target_rad.y,
+                           eulerEst.z);
+
+        //divide the demanded quaternion by the estimated to get the error
+        Quaternion quatErr = quatDem / quatEst;
+
+        // convert the quaternion to an angle error vector
+        Vector3f deltaAngErr;
+        float scaler = 1.0f-quatErr[0]*quatErr[0];
+        if (scaler > 1e-12) {
+            scaler = 1.0f/sqrtf(scaler);
+            if (quatErr[0] < 0.0f) {
+                scaler *= -1.0f;
+            }
+            deltaAngErr.x = quatErr[1] * scaler;
+            deltaAngErr.y = quatErr[2] * scaler;
+            deltaAngErr.z = quatErr[3] * scaler;
+        } else {
+            deltaAngErr.zero();
+        }
+
+        // multiply the angle error vector by a gain to calculate a demanded gimbal rate required to control tilt
+        Vector3f gimbalRateDemVecTilt = deltaAngErr * K_gimbalRate;
+
+        // Constrain the tilt correction rate vector
+        float length = gimbalRateDemVecTilt.length();
+        if (length > angRateLimit) {
+            gimbalRateDemVecTilt = gimbalRateDemVecTilt * (angRateLimit / length);
+        }
+
+        // Add the yaw and tilt control rate vectors
+        gimbalRateDemVec = gimbalRateDemVecTilt + gimbalRateDemVecYaw;
+
+        // the copter should not be using the gimbal yaw rate demand in this mode of operation, so we set it to zero
+        vehicleYawRateDem = 0.0f;
+
+    } else { // gimbal is the master for yaw pointing and the copter yaw is slaved
 
         // Calculate the demanded quaternion orientation for the gimbal
         // set the demanded quaternion using demanded 321 Euler angles wrt earth frame
@@ -201,6 +252,18 @@ void AP_Mount_MAVLink::handle_gimbal_report(mavlink_channel_t chan, mavlink_mess
             gimbalRateDemVec = gimbalRateDemVec * (angRateLimit / length);
         }
 
+        // calculate the sensor to NED cosine matrix and use the last row to calcuate the earth frame z component
+        // this is the vehicle yaw rate required to keep the vehicle and gimbal rotating at the same rate
+        Matrix3f Tsn;
+        quatEst.rotation_matrix(Tsn);
+        vehicleYawRateDem = Tsn.c.x * gimbalRateDemVec.x + Tsn.c.y * gimbalRateDemVec.y + Tsn.c.z * gimbalRateDemVec.z;
+
+        // correct the vehicle yaw rate demand to keep the yaw gimbal joint centred relative to mechanical and visual limits
+        vehicleYawRateDem += (_gimbal_report.joint_yaw - gimbalYawOffset) * K_vehicleRate;
+
+        // constrain the vehicle yaw rate demand
+        vehicleYawRateDem = constrain_float(vehicleYawRateDem, -vehYawRateLim, vehYawRateLim);
+
     }
 
     // send the gimbal control message
@@ -209,18 +272,6 @@ void AP_Mount_MAVLink::handle_gimbal_report(mavlink_channel_t chan, mavlink_mess
                                     msg->compid,
                                     gimbalRateDemVec.x, gimbalRateDemVec.y, gimbalRateDemVec.z, // demanded rates
                                     gyroBias.x, gyroBias.y, gyroBias.z);
-
-    // calculate the sensor to NED cosine matrix and use the last row to calcuate the earth frame z component
-    // this is the vehicle yaw rate required to keep the vehicle and gimbal rotating at the same rate
-    Matrix3f Tsn;
-    quatEst.rotation_matrix(Tsn);
-    vehicleYawRateDem = Tsn.c.x * gimbalRateDemVec.x + Tsn.c.y * gimbalRateDemVec.y + Tsn.c.z * gimbalRateDemVec.z;
-
-    // correct the vehicle yaw rate demand to keep the yaw gimbal joint centred relative to mechanical and visual limits
-    vehicleYawRateDem += (_gimbal_report.joint_yaw - gimbalYawOffset) * K_vehicleRate;
-
-    // constrain the vehicle yaw rate demand
-    vehicleYawRateDem = constrain_float(vehicleYawRateDem, -vehYawRateLim, vehYawRateLim);
 
 }
 
