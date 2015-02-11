@@ -42,8 +42,8 @@ class Gimbal3Axis(object):
         self.joint_angles = Vector3()
 
         # physical constraints on joint angles in (roll, pitch, azimuth) order
-        self.lower_joint_limits = Vector3(radians(-40), radians(-135), radians(-7.5))
-        self.upper_joint_limits = Vector3(radians(40),  radians(45),   radians(7.5))
+        self.lower_joint_limits = Vector3(radians(-45), radians(-135), radians(-25))
+        self.upper_joint_limits = Vector3(radians(45),  radians(45),   radians(25))
         self.travelLimitGain = 20
 
         # true gyro bias
