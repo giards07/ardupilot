@@ -232,11 +232,11 @@ static void guided_takeoff_run()
 static void guided_pos_control_run()
 {
     // process pilot's yaw input
-    float target_yaw_rate = 0;
+    AutoYawTarget yaw_target = {AutoYawTarget::AutoYawTargetMode_Rate,0.0f};
     if (!failsafe.radio) {
         // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
-        if (target_yaw_rate != 0) {
+        yaw_target.heading_or_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
+        if (yaw_target.heading_or_rate != 0) {
             set_auto_yaw_mode(AUTO_YAW_HOLD);
         }
     }
@@ -247,13 +247,18 @@ static void guided_pos_control_run()
     // call z-axis position controller (wpnav should have already updated it's alt target)
     pos_control.update_z_controller();
 
-    // call attitude controller
-    if (auto_yaw_mode == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), get_auto_heading(), true);
+    // get autopilot yaw if pilot not controlling
+    if (auto_yaw_mode != AUTO_YAW_HOLD) {
+        get_auto_yaw_target(yaw_target);
+    }
+
+    // call attitude_controller with roll, pitch and yaw targets
+    if (yaw_target.target_type == AutoYawTarget::AutoYawTargetMode_Rate) {
+        // roll & pitch angles from waypoint controller, yaw rate from pilot or get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate);
+    } else {
+        // roll, pitch from waypoint controller, yaw heading from get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate, true);
     }
 }
 
@@ -262,11 +267,11 @@ static void guided_pos_control_run()
 static void guided_vel_control_run()
 {
     // process pilot's yaw input
-    float target_yaw_rate = 0;
+    AutoYawTarget yaw_target = {AutoYawTarget::AutoYawTargetMode_Rate,0.0f};
     if (!failsafe.radio) {
         // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
-        if (target_yaw_rate != 0) {
+        yaw_target.heading_or_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
+        if (yaw_target.heading_or_rate != 0) {
             set_auto_yaw_mode(AUTO_YAW_HOLD);
         }
     }
@@ -274,13 +279,18 @@ static void guided_vel_control_run()
     // call velocity controller which includes z axis controller
     pos_control.update_vel_controller_xyz(ekfNavVelGainScaler);
 
-    // call attitude controller
-    if (auto_yaw_mode == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(pos_control.get_roll(), pos_control.get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control.angle_ef_roll_pitch_yaw(pos_control.get_roll(), pos_control.get_pitch(), get_auto_heading(), true);
+    // get autopilot yaw if pilot not controlling
+    if (auto_yaw_mode != AUTO_YAW_HOLD) {
+        get_auto_yaw_target(yaw_target);
+    }
+
+    // call attitude_controller with roll, pitch and yaw targets
+    if (yaw_target.target_type == AutoYawTarget::AutoYawTargetMode_Rate) {
+        // roll & pitch angles from waypoint controller, yaw rate from pilot or get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate);
+    } else {
+        // roll, pitch from waypoint controller, yaw heading from get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate, true);
     }
 }
 
@@ -289,12 +299,11 @@ static void guided_vel_control_run()
 static void guided_posvel_control_run()
 {
     // process pilot's yaw input
-    float target_yaw_rate = 0;
-
+    AutoYawTarget yaw_target = {AutoYawTarget::AutoYawTargetMode_Rate,0.0f};
     if (!failsafe.radio) {
         // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
-        if (target_yaw_rate != 0) {
+        yaw_target.heading_or_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
+        if (yaw_target.heading_or_rate != 0) {
             set_auto_yaw_mode(AUTO_YAW_HOLD);
         }
     }
@@ -316,13 +325,18 @@ static void guided_posvel_control_run()
     pos_control.update_xy_controller(AC_PosControl::XY_MODE_POS_AND_VEL_FF, ekfNavVelGainScaler);
     pos_control.update_z_controller();
 
-    // call attitude controller
-    if (auto_yaw_mode == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(pos_control.get_roll(), pos_control.get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control.angle_ef_roll_pitch_yaw(pos_control.get_roll(), pos_control.get_pitch(), get_auto_heading(), true);
+    // get autopilot yaw if pilot not controlling
+    if (auto_yaw_mode != AUTO_YAW_HOLD) {
+        get_auto_yaw_target(yaw_target);
+    }
+
+    // call attitude_controller with roll, pitch and yaw targets
+    if (yaw_target.target_type == AutoYawTarget::AutoYawTargetMode_Rate) {
+        // roll & pitch angles from waypoint controller, yaw rate from pilot or get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate);
+    } else {
+        // roll, pitch from waypoint controller, yaw heading from get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate, true);
     }
 }
 

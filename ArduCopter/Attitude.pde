@@ -54,9 +54,9 @@ static float get_pilot_desired_yaw_rate(int16_t stick_angle)
  * yaw controllers
  *************************************************************/
 
-// get_roi_yaw - returns heading towards location held in roi_WP
+// get_roi_yaw - sets target to point towards location held in roi_WP
 // should be called at 100hz
-static float get_roi_yaw()
+static void get_roi_yaw(AutoYawTarget& target)
 {
     static uint8_t roi_yaw_counter = 0;     // used to reduce update rate to 100hz
 
@@ -66,16 +66,29 @@ static float get_roi_yaw()
         yaw_look_at_WP_bearing = pv_get_bearing_cd(inertial_nav.get_position(), roi_WP);
     }
 
-    return yaw_look_at_WP_bearing;
+    target.target_type = AutoYawTarget::AutoYawTargetMode_Heading;
+    target.heading_or_rate = yaw_look_at_WP_bearing;
 }
 
-static float get_look_ahead_yaw()
+// get_look_ahead_yaw - sets yaw target to GPS ground course if speed is over 1m/s
+static void get_look_ahead_yaw(AutoYawTarget& target)
 {
+    target.target_type = AutoYawTarget::AutoYawTargetMode_Heading;
     // Commanded Yaw to automatically look ahead.
     if (gps.status() >= AP_GPS::GPS_OK_FIX_2D && gps.ground_speed_cm() > YAW_LOOK_AHEAD_MIN_SPEED) {
         yaw_look_ahead_bearing = gps.ground_course_cd();
     }
-    return yaw_look_ahead_bearing;
+    target.heading_or_rate = yaw_look_ahead_bearing;
+}
+
+// get_yaw_rate_from_mount - yaw rate target provided by mount
+static void get_yaw_rate_from_mount(AutoYawTarget& target)
+{
+    // default target to rate of zero
+    target = {AutoYawTarget::AutoYawTargetMode_Rate, 0};
+#if MOUNT == ENABLED
+    target.heading_or_rate = 0;//camera_mount.vehicleYawRateDemand();
+#endif
 }
 
 /*************************************************************

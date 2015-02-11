@@ -171,11 +171,11 @@ static void auto_wp_run()
     }
 
     // process pilot's yaw input
-    float target_yaw_rate = 0;
+    AutoYawTarget yaw_target = {AutoYawTarget::AutoYawTargetMode_Rate,0.0f};
     if (!failsafe.radio) {
         // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
-        if (target_yaw_rate != 0) {
+        yaw_target.heading_or_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
+        if (yaw_target.heading_or_rate != 0) {
             set_auto_yaw_mode(AUTO_YAW_HOLD);
         }
     }
@@ -186,13 +186,18 @@ static void auto_wp_run()
     // call z-axis position controller (wpnav should have already updated it's alt target)
     pos_control.update_z_controller();
 
-    // call attitude controller
-    if (auto_yaw_mode == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), get_auto_heading(),true);
+    // get autopilot yaw if pilot not controlling
+    if (auto_yaw_mode != AUTO_YAW_HOLD) {
+        get_auto_yaw_target(yaw_target);
+    }
+
+    // call attitude_controller with roll, pitch and yaw targets
+    if (yaw_target.target_type == AutoYawTarget::AutoYawTargetMode_Rate) {
+        // roll & pitch angles from waypoint controller, yaw rate from pilot or get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate);
+    } else {
+        // roll, pitch from waypoint controller, yaw heading from get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate, true);
     }
 }
 
@@ -229,11 +234,11 @@ static void auto_spline_run()
     }
 
     // process pilot's yaw input
-    float target_yaw_rate = 0;
+    AutoYawTarget yaw_target = {AutoYawTarget::AutoYawTargetMode_Rate,0.0f};
     if (!failsafe.radio) {
         // get pilot's desired yaw rate
-        target_yaw_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
-        if (target_yaw_rate != 0) {
+        yaw_target.heading_or_rate = get_pilot_desired_yaw_rate(g.rc_4.control_in);
+        if (yaw_target.heading_or_rate != 0) {
             set_auto_yaw_mode(AUTO_YAW_HOLD);
         }
     }
@@ -244,13 +249,18 @@ static void auto_spline_run()
     // call z-axis position controller (wpnav should have already updated it's alt target)
     pos_control.update_z_controller();
 
-    // call attitude controller
-    if (auto_yaw_mode == AUTO_YAW_HOLD) {
-        // roll & pitch from waypoint controller, yaw rate from pilot
-        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), target_yaw_rate);
-    }else{
-        // roll, pitch from waypoint controller, yaw heading from auto_heading()
-        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), get_auto_heading(), true);
+    // get autopilot yaw if pilot not controlling
+    if (auto_yaw_mode != AUTO_YAW_HOLD) {
+        get_auto_yaw_target(yaw_target);
+    }
+
+    // call attitude_controller with roll, pitch and yaw targets
+    if (yaw_target.target_type == AutoYawTarget::AutoYawTargetMode_Rate) {
+        // roll & pitch angles from waypoint controller, yaw rate from pilot or get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_rate_ef_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate);
+    } else {
+        // roll, pitch from waypoint controller, yaw heading from get_auto_yaw_target
+        attitude_control.angle_ef_roll_pitch_yaw(wp_nav.get_roll(), wp_nav.get_pitch(), yaw_target.heading_or_rate, true);
     }
 }
 
@@ -611,37 +621,45 @@ static void set_auto_yaw_roi(const Location &roi_location)
     }
 }
 
-// get_auto_heading - returns target heading depending upon auto_yaw_mode
+// get_auto_yaw_target - updates the AutoYawTarget with a heading or rate based on auto_yaw_mode
 // 100hz update rate
-float get_auto_heading(void)
+static void get_auto_yaw_target(AutoYawTarget& target)
 {
     switch(auto_yaw_mode) {
 
     case AUTO_YAW_ROI:
         // point towards a location held in roi_WP
-        return get_roi_yaw();
+        get_roi_yaw(target);
         break;
 
     case AUTO_YAW_LOOK_AT_HEADING:
         // keep heading pointing in the direction held in yaw_look_at_heading with no pilot input allowed
-        return yaw_look_at_heading;
+        target.target_type = AutoYawTarget::AutoYawTargetMode_Heading;
+        target.heading_or_rate = yaw_look_at_heading;
         break;
 
     case AUTO_YAW_LOOK_AHEAD:
         // Commanded Yaw to automatically look ahead.
-        return get_look_ahead_yaw();
+        get_look_ahead_yaw(target);
         break;
 
     case AUTO_YAW_RESETTOARMEDYAW:
         // changes yaw to be same as when quad was armed
-        return initial_armed_bearing;
+        target.target_type = AutoYawTarget::AutoYawTargetMode_Heading;
+        target.heading_or_rate = initial_armed_bearing;
+        break;
+
+    case AUTO_YAW_GIMBAL_TARGET:
+        // yaw rate target provided by mount
+        get_yaw_rate_from_mount(target);
         break;
 
     case AUTO_YAW_LOOK_AT_NEXT_WP:
     default:
         // point towards next waypoint.
         // we don't use wp_bearing because we don't want the copter to turn too much during flight
-        return wp_nav.get_yaw();
+        target.target_type = AutoYawTarget::AutoYawTargetMode_Heading;
+        target.heading_or_rate = wp_nav.get_yaw();
         break;
     }
 }
