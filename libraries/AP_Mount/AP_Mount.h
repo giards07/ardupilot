@@ -84,6 +84,9 @@ public:
     bool has_pan_control() const { return has_pan_control(_primary); }
     bool has_pan_control(uint8_t instance) const;
 
+    // pan_control_master_for_roi - returns true if the primariy mount controls vehicle yaw during roi (supported by multicopters only)
+    bool pan_control_master_for_roi() const;
+
     // get_mode - returns current mode of mount (i.e. Retracted, Neutral, RC_Targeting, GPS Point)
     enum MAV_MOUNT_MODE get_mode() const { return get_mode(_primary); }
     enum MAV_MOUNT_MODE get_mode(uint8_t instance) const;

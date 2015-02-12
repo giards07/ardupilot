@@ -73,6 +73,12 @@ bool AP_Mount_MAVLink::has_pan_control() const
     return false;
 }
 
+// pan_control_master_for_roi - returns true if the primary mount controls vehicle yaw during roi (supported by multicopters only)
+bool AP_Mount_MAVLink::pan_control_master_for_roi() const
+{
+    return true;
+}
+
 // set_mode - sets mount's mode
 void AP_Mount_MAVLink::set_mode(enum MAV_MOUNT_MODE mode)
 {

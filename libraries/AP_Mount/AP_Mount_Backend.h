@@ -47,6 +47,9 @@ public:
     // has_pan_control - returns true if this mount can control it's pan (required for multicopters)
     virtual bool has_pan_control() const = 0;
 
+    // pan_control_master_for_roi - returns true if the primary mount controls vehicle yaw during roi (supported by multicopters only)
+    virtual bool pan_control_master_for_roi() const { return false; }
+
     // set_mode - sets mount's mode
     virtual void set_mode(enum MAV_MOUNT_MODE mode) = 0;
 

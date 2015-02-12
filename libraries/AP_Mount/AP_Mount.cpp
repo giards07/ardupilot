@@ -476,6 +476,17 @@ bool AP_Mount::has_pan_control(uint8_t instance) const
     return _backends[instance]->has_pan_control();
 }
 
+// pan_control_master_for_roi - returns true if the primary mount controls vehicle yaw during roi (supported by multicopters only)
+bool AP_Mount::pan_control_master_for_roi() const
+{
+    if (_primary >= AP_MOUNT_MAX_INSTANCES || _backends[_primary] == NULL) {
+        return false;
+    }
+
+    // ask backend if it can be pan control master
+    return _backends[_primary]->pan_control_master_for_roi();
+}
+
 // get_mode - returns current mode of mount (i.e. Retracted, Neutral, RC_Targeting, GPS Point)
 MAV_MOUNT_MODE AP_Mount::get_mode(uint8_t instance) const
 {
