@@ -602,7 +602,11 @@ static void set_auto_yaw_roi(const Location &roi_location)
         // check if mount type requires us to rotate the quad
         if(!camera_mount.has_pan_control()) {
             roi_WP = pv_location_to_vector(roi_location);
-            set_auto_yaw_mode(AUTO_YAW_ROI);
+            if (camera_mount.pan_control_master_for_roi()) {
+                set_auto_yaw_mode(AUTO_YAW_GIMBAL_TARGET);
+            } else {
+                set_auto_yaw_mode(AUTO_YAW_ROI);
+            }
         }
         // send the command to the camera mount
         camera_mount.set_roi_target(roi_location);
