@@ -548,6 +548,10 @@ void set_auto_yaw_mode(uint8_t yaw_mode)
     case AUTO_YAW_RESETTOARMEDYAW:
         // initial_armed_bearing will be set during arming so no init required
         break;
+
+    case AUTO_YAW_MOUNT_AS_MASTER:
+        // target will be a rate from the gimbal and is always initialised to zero
+        break;
     }
 }
 
@@ -603,7 +607,7 @@ static void set_auto_yaw_roi(const Location &roi_location)
         if(!camera_mount.has_pan_control()) {
             roi_WP = pv_location_to_vector(roi_location);
             if (camera_mount.pan_control_master_for_roi()) {
-                set_auto_yaw_mode(AUTO_YAW_GIMBAL_TARGET);
+                set_auto_yaw_mode(AUTO_YAW_MOUNT_AS_MASTER);
             } else {
                 set_auto_yaw_mode(AUTO_YAW_ROI);
             }
@@ -653,7 +657,7 @@ static void get_auto_yaw_target(AutoYawTarget& target)
         target.heading_or_rate = initial_armed_bearing;
         break;
 
-    case AUTO_YAW_GIMBAL_TARGET:
+    case AUTO_YAW_MOUNT_AS_MASTER:
         // yaw rate target provided by mount
         get_yaw_rate_from_mount(target);
         break;

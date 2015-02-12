@@ -21,7 +21,7 @@
 #define AUTO_YAW_LOOK_AT_HEADING        3       // point towards a particular angle (not pilot input accepted)
 #define AUTO_YAW_LOOK_AHEAD             4       // point in the direction the copter is moving
 #define AUTO_YAW_RESETTOARMEDYAW        5       // point towards heading at time motors were armed
-#define AUTO_YAW_GIMBAL_TARGET          6       // earth-frame yaw rate target from gimbal
+#define AUTO_YAW_MOUNT_AS_MASTER        6       // earth-frame yaw rate target from camera mount
 
 // Ch6, Ch7 and Ch8 aux switch control
 #define AUX_SWITCH_PWM_TRIGGER_HIGH 1800   // pwm value above which the ch7 or ch8 option will be invoked
