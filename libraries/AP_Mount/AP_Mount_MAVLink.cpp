@@ -160,14 +160,15 @@ void AP_Mount_MAVLink::handle_gimbal_report(mavlink_channel_t chan, mavlink_mess
         // constrain the vehicle relative yaw rate demand
         gimbalRateDemVecYaw.z = constrain_float(gimbalRateDemVecYaw.z, -angRateLimit, angRateLimit);
 
-        // Add the vehicle yaw rate after filtering and scaling
-        // scaling is applied as a function of yaw rate such that the steady state error does not exceed the limit set
+        // Filter the vehicle yaw rate
         vehicleYawRateFilt = (1.0f - yawRateFiltPole * _gimbal_report.delta_time) * vehicleYawRateFilt + yawRateFiltPole * _gimbal_report.delta_time * _frontend._ahrs.get_gyro().z;
+
         // calculate the maximum steady state rate error corresponding to the maximum permitted yaw angle error
         float maxRate = K_gimbalRate * yawErrorLimit;
+
         // compare max steady state rate error with vehicle yaw rate magnitude
+        // if the difference is positive, then use some forward rate demand to keep steady state error within limits
         float excessRateMag = fabs(vehicleYawRateFilt) - maxRate;
-        // if the difference is positive, then we need to use some forward rate demand to reduce steady state error
         if (excessRateMag > 0.0f) {
             if (vehicleYawRateFilt >= 0.0f) {
                 gimbalRateDemVecYaw.z += excessRateMag;
