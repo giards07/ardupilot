@@ -160,20 +160,19 @@ void AP_Mount_MAVLink::handle_gimbal_report(mavlink_channel_t chan, mavlink_mess
         // constrain the vehicle relative yaw rate demand
         gimbalRateDemVecYaw.z = constrain_float(gimbalRateDemVecYaw.z, -angRateLimit, angRateLimit);
 
-        // Filter the vehicle yaw rate
-        vehicleYawRateFilt = (1.0f - yawRateFiltPole * _gimbal_report.delta_time) * vehicleYawRateFilt + yawRateFiltPole * _gimbal_report.delta_time * _frontend._ahrs.get_gyro().z;
+        // Get filtered vehicle turn rate in earth frame
+        vehicleYawRateFilt = (1.0f - yawRateFiltPole * _gimbal_report.delta_time) * vehicleYawRateFilt + yawRateFiltPole * _gimbal_report.delta_time * _frontend._ahrs.get_yaw_rate_earth();
+        Vector3f vehicle_rate_ef(0,0,vehicleYawRateFilt);
 
-        // calculate the maximum steady state rate error corresponding to the maximum permitted yaw angle error
+         // calculate the maximum steady state rate error corresponding to the maximum permitted yaw angle error
         float maxRate = K_gimbalRate * yawErrorLimit;
-
-        // compare max steady state rate error with vehicle yaw rate magnitude
-        // if the difference is positive, then use some forward rate demand to keep steady state error within limits
-        float excessRateMag = fabs(vehicleYawRateFilt) - maxRate;
-        if (excessRateMag > 0.0f) {
-            if (vehicleYawRateFilt >= 0.0f) {
-                gimbalRateDemVecYaw.z += excessRateMag;
-            } else {
-                gimbalRateDemVecYaw.z -= excessRateMag;
+        float vehicle_rate_mag_ef = vehicle_rate_ef.length();
+        float excess_rate_correction = fabs(vehicle_rate_mag_ef) - maxRate;
+        if (vehicle_rate_mag_ef > maxRate) {
+            if (vehicle_rate_ef.z>0.0f){
+                gimbalRateDemVecYaw += _frontend._ahrs.get_dcm_matrix().transposed()*Vector3f(0,0,excess_rate_correction);
+            }else{
+                gimbalRateDemVecYaw -= _frontend._ahrs.get_dcm_matrix().transposed()*Vector3f(0,0,excess_rate_correction);
             }
         }
 
