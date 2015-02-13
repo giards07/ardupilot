@@ -67,7 +67,7 @@ private:
     float vehicleYawRateDem;
 
     // gain from angle error to gimbal rate demand
-    float const K_gimbalRate = 1.0f;
+    float const K_gimbalRate = 0.2f;
 
     // gain from angle error to vehicle yaw rate demand
     float const K_vehicleRate = 1.0f;
