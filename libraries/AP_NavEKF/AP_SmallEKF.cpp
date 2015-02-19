@@ -24,6 +24,37 @@ extern const AP_HAL::HAL& hal;
 
 // Define tuning parameters
 const AP_Param::GroupInfo SmallEKF::var_info[] PROGMEM = {
+
+    // @Param: VEL_NOISE
+    // @DisplayName: velocity aiding measurement noise (m/s)
+    // @Description: Increasing it causes the filter to be slower to align, but also means that errors in the aiding velocity from the main navigation filter will perturb the attitude less.
+    // @User: Advanced
+    AP_GROUPINFO("VEL_NOISE",    0, SmallEKF, _velNoise, 0.5f),
+
+    // @Param: YAW_NOISE
+    // @DisplayName: compass yaw noise (rad)
+    // @Description: Increasing it causes the filter to be slower to align, but also means that compass and compass relative alignmnet errors will perturb the yaw less.
+    // @User: Advanced
+    AP_GROUPINFO("YAW_NOISE",    1, SmallEKF, _magYawNoise, 0.17f),
+
+    // @Param: GYRO_PNOISE
+    // @DisplayName: Rate gyro noise (rad/s)
+    // @Description: This noise controls the growth of estimated error due to gyro measurement errors excluding bias. Increasing it makes the flter trust the gyro measurements less and other measurements more.
+    // @User: Advanced
+    AP_GROUPINFO("GYRO_PNOISE",    2, SmallEKF, _gyrNoise, 0.0087f),
+
+    // @Param: ACC_PNOISE
+    // @DisplayName: Accelerometer noise (m/s^2)
+    // @Description: This noise controls the growth of estimated error due to accelerometer measurement errors excluding bias. Increasing it makes the flter trust the accelerometer measurements less and other measurements more.
+    // @User: Advanced
+    AP_GROUPINFO("ACC_PNOISE",    3, SmallEKF, _accNoise, 0.5f),
+
+    // @Param: GBIAS_PNOISE
+    // @DisplayName: Rate gyro bias process noise (rad/s^2)
+    // @Description: This noise controls the growth of gyro bias state error estimates. Increasing it makes rate gyro bias estimation faster and noisier.
+    // @User: Advanced
+    AP_GROUPINFO("GBIAS_PNOISE",    4, SmallEKF, _gyroBiasProcessNoise, 5e-4f),
+
     AP_GROUPEND
 };
 
@@ -155,15 +186,15 @@ void SmallEKF::predictStates()
 // gyro_bias_state_noise
 void SmallEKF::predictCovariance()
 {
-    float delAngBiasVariance = sq(dtIMU*dtIMU*5E-4f);
+    float delAngBiasVariance = sq(dtIMU*dtIMU*_gyroBiasProcessNoise);
 
-    float daxNoise = sq(dtIMU*0.0087f);
-    float dayNoise = sq(dtIMU*0.0087f);
-    float dazNoise = sq(dtIMU*0.0087f);
+    float daxNoise = sq(dtIMU*_gyrNoise);
+    float dayNoise = sq(dtIMU*_gyrNoise);
+    float dazNoise = sq(dtIMU*_gyrNoise);
 
-    float dvxNoise = sq(dtIMU*0.5f);
-    float dvyNoise = sq(dtIMU*0.5f);
-    float dvzNoise = sq(dtIMU*0.5f);
+    float dvxNoise = sq(dtIMU*_accNoise);
+    float dvyNoise = sq(dtIMU*_accNoise);
+    float dvzNoise = sq(dtIMU*_accNoise);
     float dvx = gSense.delVel.x;
     float dvy = gSense.delVel.y;
     float dvz = gSense.delVel.z;
@@ -553,7 +584,7 @@ void SmallEKF::predictCovariance()
 // Fuse the SmallEKF velocity estimates - this enables alevel reference to be maintained during constant turns
 void SmallEKF::fuseVelocity(bool yawInit)
 {
-    float R_OBS = 0.25f;
+    float R_OBS = _velNoise * _velNoise;
     float innovation[3];
     float varInnov[3];
     Vector3f angErrVec;
@@ -652,7 +683,7 @@ void SmallEKF::fuseCompass()
     float magY = magData.y;
     float magZ = magData.z;
 
-    const float R_MAG = 3e-2f;
+    const float R_MAG = _magYawNoise * _magYawNoise;
 
     // Calculate observation Jacobian
     float t5695 = sq(q0);

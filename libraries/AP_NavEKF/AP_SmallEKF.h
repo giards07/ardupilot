@@ -118,6 +118,13 @@ private:
         float gTheta;
     } gSense;
 
+    // Mavlink Tuneable Parameters
+    AP_Float _velNoise;             // velocity measurement noise : m/s
+    AP_Float _magYawNoise;          // noise in the magnetic heading measurement : rad
+    AP_Float _gyrNoise;             // gyro process noise : rad/s
+    AP_Float _accNoise;             // accelerometer process noise : m/s^2
+    AP_Float _gyroBiasProcessNoise; // gyro bias state process noise : rad/s
+
     float Cov[9][9];                // covariance matrix
     Matrix3f Tsn;                   // Sensor to NED rotation matrix
     float TiltCorrection;           // Angle correction applied to tilt from last velocity fusion (rad)
