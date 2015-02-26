@@ -557,6 +557,7 @@ static int16_t climb_rate;
 // The altitude as reported by Sonar in cm - Values are 20 to 700 generally.
 static int16_t sonar_alt;
 static uint8_t sonar_alt_health;   // true if we can trust the altitude from the sonar
+static uint8_t flowSonarAltHealt   // true if we can trust altitude from PX4FLOW sonar
 static float target_sonar_alt;      // desired altitude in cm above the ground
 static int32_t baro_alt;            // barometer altitude in cm above home
 static float baro_climbrate;        // barometer climbrate in cm/s
