@@ -68,6 +68,7 @@ void AP_OpticalFlow_PX4::update(void)
         struct OpticalFlow::OpticalFlow_state state;
         state.device_id = report.sensor_id;
         state.surface_quality = report.quality;
+        state.gnd_distance = report.ground_distance_m;
         if (report.integration_timespan > 0) {
             const Vector2f flowScaler = _flowScaler();
             float flowScaleFactorX = 1.0f + 0.001f * flowScaler.x;
